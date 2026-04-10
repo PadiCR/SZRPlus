@@ -56,7 +56,7 @@ If you use SZR+ in your research, please acknowledge both the original work and 
 
 *   **Main Author**: Cristobal Padilla
 *   **Original Author**: Giacomo Titti (CNR-IRPI-Padova)
-*   **Contributors**: Alessandro Sarretta, Luigi Lombardo.
+*   **Contributors**: Alessandro Sarretta, Luigi Lombardo, Alessandro Corsini, Cecilia Fabbiani.
 *   **Acknowledgments**: UI redesigned with Qt Designer. Code logic and algorithms refined with the assistance of AI tools (Gemini, Claude).
 
 ## Contact and Support
