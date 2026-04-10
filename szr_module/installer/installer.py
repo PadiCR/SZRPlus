@@ -183,26 +183,21 @@ class installer():
             if self.site_packages_path in sys.path:
                 sys.path.remove(self.site_packages_path)
                 os.environ["PYTHONPATH"] = os.environ["PYTHONPATH"].replace(
-                    self.bin_path + ";", ""
+                    self.bin_path + os.pathsep, ""
                 )
-                os.environ["PATH"] = os.environ["PATH"].replace(self.bin_path + ";", "")
+                os.environ["PATH"] = os.environ["PATH"].replace(self.bin_path + os.pathsep, "")
             try:
                 # Attempt to delete the folder and its contents using shutil
-                shutil.rmtree(self.venv_path)
+                import stat
+                def remove_readonly(func, path, excinfo):
+                    os.chmod(path, stat.S_IWRITE)
+                    func(path)
+                shutil.rmtree(self.venv_path, onerror=remove_readonly)
                 print(f"Folder '{self.venv_path}' and its contents deleted successfully.")
                 log(f"Folder '{self.venv_path}' and its contents deleted successfully.")
-            except PermissionError:
-                # If permission error occurs, try using os module with elevated privileges
-                try:
-                    if platform.system() == 'Windows':
-                        os.system(f'rmdir /s /q "{self.venv_path}"')
-                        log(f"Folder '{self.venv_path}' and its contents deleted successfully.")
-                    else:
-                        os.system(f'sudo rm -rf "{self.venv_path}"')
-                        log(f"Folder '{self.venv_path}' and its contents deleted successfully.")
-                except Exception as e:
-                    print(f"Error deleting folder '{self.venv_path}': {e}")
-                    log(f"Error deleting folder '{self.venv_path}': {e}")
+            except Exception as e:
+                print(f"Error deleting folder '{self.venv_path}': {e}")
+                log(f"Error deleting folder '{self.venv_path}': {e}")
 
         
         

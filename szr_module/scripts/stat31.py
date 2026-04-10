@@ -1,4 +1,4 @@
-﻿#!/usr/bin/python
+#!/usr/bin/python
 #coding=utf-8
 """
 /***************************************************************************
@@ -384,7 +384,7 @@ class rasterstatkernelAlgorithm(QgsProcessingAlgorithm):
                             attributi[count]=[float(g[ix][row[i],col[i]])]
                         count+=1
             #g = {}
-            fn = self.f+'/stat'+str(lll[ix])+'.shp'
+            fn = os.path.join(self.f, f'stat{lll[ix]}.shp')
             if os.path.isfile(fn):
                 os.remove(fn)
             layerFields = QgsFields()

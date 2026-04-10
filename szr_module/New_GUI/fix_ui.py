@@ -1,6 +1,6 @@
-﻿import os
+import os
 
-ui_file = r"c:\Users\crist\Documents\UNIMORE\PLUGIN\SZ\SZ-plugin-115\szr_module\New_GUI\SZ_edu.ui"
+ui_file = os.path.join(os.path.dirname(__file__), 'SZ_edu.ui')
 with open(ui_file, 'rb') as f:
     content = f.read().decode('utf-8')
 

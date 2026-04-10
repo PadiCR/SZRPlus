@@ -6,7 +6,7 @@
 name=SZR+
 qgisMinimumVersion=3.28
 description=SZR+ (Susceptibility Zoning + Raster capabilities)
-version=1.5
+version=1.6
 author=Cristobal Padilla
 email=cristobalpadilla@gmail.com
 

@@ -156,12 +156,12 @@ def add_QGIS_env(prefix_path,plugin_venv):
         log(f"Adding {site_packages_path} to PYTHONPATH")
         sys.path.insert(0, site_packages_path)
         os.environ["PYTHONPATH"] = (
-            site_packages_path + ";" + os.environ.get("PYTHONPATH", "")
+            site_packages_path + os.pathsep + os.environ.get("PYTHONPATH", "")
         )
     
     if bin_path not in os.environ["PATH"]:
         log(f"Adding {bin_path} to PATH")
-        os.environ["PATH"] = bin_path + ";" + os.environ["PATH"]  
+        os.environ["PATH"] = bin_path + os.pathsep + os.environ["PATH"]  
 
     return (site_packages_path, bin_path)
 

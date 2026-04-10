@@ -35,3 +35,7 @@ coverage.xml
 # OS
 .DS_Store
 Thumbs.db
+
+# Testing
+tests/
+.pytest_cache/

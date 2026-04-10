@@ -1,6 +1,6 @@
-﻿import os
+import os
 
-filepath = 'c:/Users/crist/Documents/UNIMORE/PLUGIN/SZ/SZ-plugin-115/szr_module/New_GUI/sz_edu_dialog.py'
+filepath = os.path.join(os.path.dirname(__file__), 'New_GUI', 'sz_edu_dialog.py')
 with open(filepath, 'r', encoding='utf-8') as f:
     content = f.read()
 

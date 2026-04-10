@@ -1,4 +1,4 @@
-﻿#!/usr/bin/python
+#!/usr/bin/python
 #coding=utf-8
 """
 /***************************************************************************
@@ -158,11 +158,21 @@ class cleankernelAlgorithm(QgsProcessingAlgorithm):
         newXNumPxl=np.round(abs(self.xmax-self.xmin)/(abs(geot[1]))).astype(int)
         newYNumPxl=np.round(abs(self.ymax-self.ymin)/(abs(geot[5]))).astype(int)
         try:
-            os.system('gdal_translate -of GTiff -ot Float32 -strict -outsize ' + str(newXNumPxl) +' '+ str(newYNumPxl) +' -projwin ' +str(self.xmin)+' '+str(self.ymax)+' '+ str(self.xmax) + ' ' + str(self.ymin) +' -co COMPRESS=DEFLATE -co PREDICTOR=1 -co ZLEVEL=6 ' + parameters['INPUT_RASTER_LAYER'] +' '+ self.f+'/sizedslopexxx.tif')
-        except:
-            raise ValueError  # Failure to save sized cause, see 'WoE' Log Messages Panel
+            out_path = os.path.join(self.f, 'sizedslopexxx.tif')
+            translate_options = gdal.TranslateOptions(
+                format='GTiff',
+                outputType=gdal.GDT_Float32,
+                strict=True,
+                width=newXNumPxl,
+                height=newYNumPxl,
+                projWin=[self.xmin, self.ymax, self.xmax, self.ymin],
+                creationOptions=['COMPRESS=DEFLATE', 'PREDICTOR=1', 'ZLEVEL=6']
+            )
+            gdal.Translate(out_path, parameters['INPUT_RASTER_LAYER'], options=translate_options)
+        except Exception as e:
+            raise ValueError(f"Failure to translate raster: {e}")
         del ds
-        self.ds1=gdal.Open(self.f+'/sizedslopexxx.tif')
+        self.ds1=gdal.Open(out_path)
         if self.ds1 is None:
             print("ERROR: can't open raster input")
         nodata=self.ds1.GetRasterBand(1).GetNoDataValue()
