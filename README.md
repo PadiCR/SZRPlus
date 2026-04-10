@@ -5,7 +5,10 @@
 
 ## Introduction
 
-**SZR+** is an advanced QGIS plugin for susceptibility mapping and spatial analysis. It is a major evolution of the original **SZ-plugin**, introducing **native raster capabilities**, a completely **redesigned GUI**, and enhanced statistical workflows.
+**SZR+** is an advanced QGIS plugin for susceptibility mapping and spatial analysis. It is a major evolution based on the original **SZ-plugin version 1.1.5**. 
+
+> [!NOTE]
+> While the original SZ-plugin project has recently released a version 2.0 with new features, **SZR+** is independently developed based on the 1.x codebase, introducing native raster capabilities and a completely redesigned GUI.
 
 While primarily developed for landslide susceptibility, SZR+ is a versatile tool applicable to various natural hazards and inter-disciplinary spatial modeling tasks.
 
