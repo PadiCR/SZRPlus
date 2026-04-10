@@ -1,0 +1,163 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>SzEduDialog</class>
+ <widget class="QDialog" name="SzEduDialog">
+  <property name="geometry">
+   <rect><x>0</x><y>0</y><width>1100</width><height>680</height></rect>
+  </property>
+  <property name="windowTitle"><string>SZR+ (Susceptibility Zoning + Raster capabilities)</string></property>
+  <layout class="QVBoxLayout" name="mainLayout">
+   <item>
+    <widget class="QTabWidget" name="mainTabWidget">
+     <property name="currentIndex"><number>0</number></property>
+
+     <!-- ═══════════════════════════ TAB 1: RASTER BASE ═══════════════════════════ -->
+     <widget class="QWidget" name="tab_raster">
+      <attribute name="title"><string>Raster Base (Pixel Units)</string></attribute>
+      <layout class="QHBoxLayout" name="rasterBaseLayout">
+       <!-- Left: algorithm list -->
+       <item>
+        <layout class="QVBoxLayout">
+         <item><widget class="QLabel" name="lbl_r_title">
+          <property name="text"><string>Susceptibility Method</string></property>
+          <property name="font"><font><bold>true</bold></font></property>
+         </widget></item>
+         <item>
+          <widget class="QListWidget" name="SIfunct_r">
+           <item><property name="text"><string>Weight of Evidence (WoE)</string></property></item>
+           <item><property name="text"><string>Frequency Ratio (FR)</string></property></item>
+           <item><property name="text"><string>Logistic Regression (LR)</string></property></item>
+           <item><property name="text"><string>Random Forest (RF)</string></property></item>
+           <item><property name="text"><string>Support Vector Machine (SVM)</string></property></item>
+           <item><property name="text"><string>Decision Trees (DT)</string></property></item>
+          </widget>
+         </item>
+         <item><widget class="QLabel" name="lbl_cl_r_title">
+          <property name="text"><string>Classify SI</string></property>
+          <property name="font"><font><bold>true</bold></font></property>
+         </widget></item>
+         <item>
+          <widget class="QListWidget" name="classify_list_r">
+           <item><property name="text"><string>Classify Raster by ROC</string></property></item>
+           <item><property name="text"><string>ROC Generator</string></property></item>
+           <item><property name="text"><string>Confusion Matrix (FP/TN Threshold)</string></property></item>
+          </widget>
+         </item>
+        </layout>
+       </item>
+       <!-- Right: stacked widget (pages built in Python) -->
+       <item>
+        <widget class="QStackedWidget" name="stackedWidget_r">
+         <property name="frameShape"><enum>QFrame::Box</enum></property>
+         <widget class="QWidget" name="r_page_woe"/>
+         <widget class="QWidget" name="r_page_fr"/>
+         <widget class="QWidget" name="r_page_lr"/>
+         <widget class="QWidget" name="r_page_rf"/>
+         <widget class="QWidget" name="r_page_svm"/>
+         <widget class="QWidget" name="r_page_dt"/>
+        </widget>
+       </item>
+      </layout>
+     </widget>
+
+     <!-- ═══════════════════════════ TAB 2: VECTOR BASE ═══════════════════════════ -->
+     <widget class="QWidget" name="tab_vector">
+      <attribute name="title"><string>Vector Base (Slope Units)</string></attribute>
+      <layout class="QHBoxLayout" name="vectorBaseLayout">
+       <!-- Left: algorithm list -->
+       <item>
+        <layout class="QVBoxLayout">
+         <item><widget class="QLabel" name="lbl_v_title">
+          <property name="text"><string>Susceptibility Method</string></property>
+          <property name="font"><font><bold>true</bold></font></property>
+         </widget></item>
+         <item>
+          <widget class="QListWidget" name="SIfunct_v">
+           <item><property name="text"><string>Weight of Evidence (WoE)</string></property></item>
+           <item><property name="text"><string>Frequency Ratio (FR)</string></property></item>
+           <item><property name="text"><string>Logistic Regression (LR)</string></property></item>
+           <item><property name="text"><string>Random Forest (RF)</string></property></item>
+           <item><property name="text"><string>Support Vector Machine (SVM)</string></property></item>
+           <item><property name="text"><string>Decision Trees (DT)</string></property></item>
+          </widget>
+         </item>
+         <item><widget class="QLabel" name="lbl_dp_title">
+          <property name="text"><string>Data Preparation</string></property>
+          <property name="font"><font><bold>true</bold></font></property>
+         </widget></item>
+         <item>
+          <widget class="QListWidget" name="dataprep_list">
+           <item><property name="text"><string>Clean Points By Raster Kernel</string></property></item>
+           <item><property name="text"><string>Attribute Table Statistics</string></property></item>
+           <item><property name="text"><string>Points Kernel Statistics</string></property></item>
+           <item><property name="text"><string>Points Kernel Graphs</string></property></item>
+           <item><property name="text"><string>Points Sampler</string></property></item>
+           <item><property name="text"><string>Points To Grid</string></property></item>
+           <item><property name="text"><string>Poly To Grid</string></property></item>
+           <item><property name="text"><string>Classify Field by .txt File</string></property></item>
+           <item><property name="text"><string>Classify Field in Quantiles</string></property></item>
+           <item><property name="text"><string>Correlation Plot</string></property></item>
+          </widget>
+         </item>
+         <item><widget class="QLabel" name="lbl_cl_title">
+          <property name="text"><string>Classify SI</string></property>
+          <property name="font"><font><bold>true</bold></font></property>
+         </widget></item>
+         <item>
+          <widget class="QListWidget" name="classify_list">
+           <item><property name="text"><string>Classify Vector by ROC</string></property></item>
+           <item><property name="text"><string>Classify Vector by Weighted ROC</string></property></item>
+           <item><property name="text"><string>ROC Generator</string></property></item>
+           <item><property name="text"><string>Confusion Matrix (FP/TN Threshold)</string></property></item>
+          </widget>
+         </item>
+        </layout>
+       </item>
+       <!-- Right: stacked widget (pages built in Python) -->
+       <item>
+        <widget class="QStackedWidget" name="stackedWidget_v">
+         <property name="frameShape"><enum>QFrame::Box</enum></property>
+         <widget class="QWidget" name="v_page_woe"/>
+         <widget class="QWidget" name="v_page_fr"/>
+         <widget class="QWidget" name="v_page_lr"/>
+         <widget class="QWidget" name="v_page_rf"/>
+         <widget class="QWidget" name="v_page_svm"/>
+         <widget class="QWidget" name="v_page_dt"/>
+         <widget class="QWidget" name="dp_page_clean"/>
+         <widget class="QWidget" name="dp_page_stats"/>
+         <widget class="QWidget" name="dp_page_kernel_stats"/>
+         <widget class="QWidget" name="dp_page_kernel_graphs"/>
+         <widget class="QWidget" name="dp_page_sampler"/>
+         <widget class="QWidget" name="dp_page_ptogrid"/>
+         <widget class="QWidget" name="dp_page_polytogrid"/>
+         <widget class="QWidget" name="dp_page_classtxt"/>
+         <widget class="QWidget" name="dp_page_classdec"/>
+         <widget class="QWidget" name="dp_page_corr"/>
+         <widget class="QWidget" name="cl_page_classv"/>
+         <widget class="QWidget" name="cl_page_classvw"/>
+         <widget class="QWidget" name="cl_page_roc"/>
+         <widget class="QWidget" name="cl_page_confusion"/>
+        </widget>
+       </item>
+      </layout>
+     </widget>
+
+    </widget>
+   </item>
+  </layout>
+ </widget>
+ <customwidgets>
+  <customwidget>
+   <class>QgsFileWidget</class>
+   <extends>QWidget</extends>
+   <header>qgsfilewidget.h</header>
+  </customwidget>
+  <customwidget>
+   <class>QgsMapLayerComboBox</class>
+   <extends>QComboBox</extends>
+   <header>qgsmaplayer combobox.h</header>
+  </customwidget>
+ </customwidgets>
+ <resources/>
+ <connections/>
+</ui>

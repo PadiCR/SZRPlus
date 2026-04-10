@@ -1,0 +1,42 @@
+# This file contains metadata for your plugin.
+
+# This file should be included when you package your plugin.# Mandatory items:
+
+[general]
+name=SZR+
+qgisMinimumVersion=3.28
+description=SZR+ (Susceptibility Zoning + Raster capabilities)
+version=1.5
+author=Cristobal Padilla
+email=cristobalpadilla@gmail.com
+
+about=SZR+ is a modified version of SZ-plugin that allows the evaluation of the spatial susceptibility with native raster capabilities and a new GUI. Originally built upon SZ-plugin by Giacomo Titti (giacomotitti@gmail.com).
+
+tracker=https://github.com/PadiCR/SZRPlus/issues
+repository=https://github.com/PadiCR/SZRPlus
+# End of mandatory metadata
+
+# Recommended items:
+
+hasProcessingProvider=yes
+# Uncomment the following line and add your changelog:
+# changelog=
+
+# Tags are comma separated with spaces allowed
+tags=susceptibility, cross-validation, pre-processing, statistical methods, hazard
+
+homepage=https://github.com/PadiCR/SZRPlus
+category=Spatial analysis
+# plugin_dependencies= scikit-learn, libpysal
+icon=icon.svg
+# experimental flag
+experimental=False
+
+# deprecated flag (applies to the whole plugin, not just a single version)
+deprecated=False
+
+Category of the plugin: Raster, Vector, Database or Web
+# category=
+
+# If the plugin can run on QGIS Server.
+server=False
