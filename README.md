@@ -13,20 +13,24 @@
 While primarily developed for landslide susceptibility, SZR+ is a versatile tool applicable to various natural hazards and inter-disciplinary spatial modeling tasks.
 
 ### Key Features
-*   **Native Raster Support**: Direct processing of raster datasets for faster and more scalable analysis.
 *   **Modern GUI**: A redesigned, user-friendly interface based on QGIS processing standards.
-*   **Statistical Models**:
-    *   Weight of Evidence (WoE)
-    *   Frequency Ratio (FR)
-    *   Logistic Regression (LR)
-    *   Decision Tree (DT)
-    *   Support Vector Machine (SVM)
-    *   Random Forest (RF)
-*   **Validation**:
-    *   Random Test/Train split.
-    *   K-Fold Cross-Validation.
-    *   ROC Curve and AUC generation.
-*   **Classification**: Advanced SI classification methods (ROC maximization, F1-Score, Threat Score).
+*   **Vector Base Mode**: Retains all the original vector-based analysis functions from the SZ-plugin version 1.1.5, fully integrated into the redesigned UI.
+*   **Raster Base Mode**:
+    *   **Native Raster Support**: Direct processing of raster datasets for faster and more scalable analysis.
+        *   **Requirement**: All input rasters must be aligned and have the exact same spatial resolution.
+        *   **Requirement (Landslide Inventory)**: The landslide inventory must be a binary raster (1 for landslide occurrence, 0 for no landslide).
+    *   **Statistical Models**:
+        *   Weight of Evidence (WoE)
+        *   Frequency Ratio (FR)
+        *   Logistic Regression (LR)
+        *   Decision Tree (DT)
+        *   Support Vector Machine (SVM)
+        *   Random Forest (RF)
+    *   **Validation**:
+        *   Random Test/Train split.
+        *   K-Fold Cross-Validation.
+        *   ROC Curve and AUC generation.
+    *   **Classification**: Advanced SI classification methods (ROC maximization, F1-Score, Threat Score).
 
 ## Installation
 
