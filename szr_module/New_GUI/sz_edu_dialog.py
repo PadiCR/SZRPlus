@@ -462,7 +462,7 @@ def _make_raster_page(algo_name: str):
         sp_layout = QVBoxLayout(sub_page)
 
         # Landslide raster (now a combo box)
-        inv_lbl = QLabel("Landslide raster")
+        inv_lbl = QLabel("Landslide Raster Inventory")
         inv_lbl.setStyleSheet("font-weight: bold;")
         sp_layout.addWidget(inv_lbl)
         
@@ -474,7 +474,7 @@ def _make_raster_page(algo_name: str):
         btn_inv_browse = QPushButton("Browse...")
         def _browse_inv(*args, c=inv_combo):
             from qgis.PyQt.QtWidgets import QFileDialog
-            f, _ = QFileDialog.getOpenFileName(sub_page, "Select Landslide Raster", "", "GeoTIFF (*.tif *.tiff)")
+            f, _ = QFileDialog.getOpenFileName(sub_page, "Select Landslide Raster Inventory", "", "GeoTIFF (*.tif *.tiff)")
             if f:
                 from qgis.core import QgsRasterLayer, QgsProject
                 lyr = QgsRasterLayer(f, os.path.basename(f))
@@ -939,6 +939,8 @@ class SzEduDialog(QDialog, FORM_CLASS):
                    (self.SIfunct_r.currentRow() != -1 and self.classify_list_r.currentRow() == -1):
                     name = self.SIfunct_r.currentItem().text()
                     text_name = INFO_DICT.get(name, name)
+                    if text_name:
+                        text_name = text_name.replace("- Dependent Variable (Landslide inventory).", "- Dependent Variable (Landslide Raster Inventory): Binary raster with value 1 for presence and 0 for absence of landslide.")
                     curr_stack_idx = self.stackedWidget_r.currentIndex()
                     if curr_stack_idx >= 0 and curr_stack_idx < len(self.ALGO_KEYS_R):
                         algo_key = self.ALGO_KEYS_R[curr_stack_idx]
@@ -957,6 +959,22 @@ class SzEduDialog(QDialog, FORM_CLASS):
                    (self.SIfunct_v.currentRow() != -1 and self.dataprep_list.currentRow() == -1 and self.classify_list.currentRow() == -1):
                     name = self.SIfunct_v.currentItem().text()
                     text_name = INFO_DICT.get(name, name)
+                    if text_name:
+                        if "<b>Inputs Required:</b><br>" in text_name:
+                            parts = text_name.split("<b>Inputs Required:</b><br>")
+                            if "Weight of Evidence (WoE)" in name or "Frequency Ratio (FR)" in name:
+                                indep_text = "- Independent Variables: Fields values must be classified/categorical."
+                            else:
+                                indep_text = "- Independent Variables: Fields values can be both continuous and categorical."
+                            
+                            vector_inputs = (
+                                "Slope Units Vector layer: layer that contains the dependent variable and independent variables as fields in the attribute table:<br>"
+                                "- Dependent Variable: Field with number of landslides in the slope unit<br>"
+                                + indep_text
+                            )
+                            text_name = parts[0] + "<b>Inputs Required:</b><br>" + vector_inputs
+                        else:
+                            text_name = text_name.replace("- Dependent Variable (Landslide inventory).", "- Slope Units Vector layer which contains the dependent variables and independent variables as fields in the attribute table.")
                     curr_stack_idx = self.stackedWidget_v.currentIndex()
                     if curr_stack_idx >= 0 and curr_stack_idx < len(self.ALGO_KEYS_R):
                         algo_key = self.ALGO_KEYS_R[curr_stack_idx]
@@ -1444,7 +1462,7 @@ class SzEduDialog(QDialog, FORM_CLASS):
         
         inv_layer = m_refs['inventory'].currentLayer()
         if not inv_layer or not inv_layer.isValid():
-            QMessageBox.warning(self, "Missing input", "Please select a valid Landslide raster.")
+            QMessageBox.warning(self, "Missing input", "Please select a valid Landslide Raster Inventory.")
             return
         inventory = inv_layer.source()
         
