@@ -9,8 +9,7 @@ from typing import List, Union
 
 from pkg_resources import ResolutionError
 from qgis.core import Qgis, QgsApplication
-from qgis.PyQt.QtCore import Qt
-from qgis.PyQt.QtWidgets import QProgressDialog
+
 from qgis.utils import iface
 from ..utils import log,warn
 
@@ -84,11 +83,12 @@ def run_cmd(args, description="Installing...."):
         # message.exec_()
     else:
         log("Command succeeded.")
-        iface.messageBar().pushMessage(
-            "Success",
-            f"{description.capitalize()} succeeded",
-            level=Qgis.Success,
-        )
+        if iface is not None:
+            iface.messageBar().pushMessage(
+                "Success",
+                f"{description.capitalize()} succeeded",
+                level=Qgis.Success,
+            )
 
 def locate_py():
         # get Python version
@@ -97,19 +97,25 @@ def locate_py():
             # non-Linux
             path_py = os.environ["PYTHONHOME"]
         except Exception:
-            # Linux
+            # Linux / fallback
             path_py = sys.executable
-        # convert to Path for eaiser processing
-        path_py = Path(path_py)     
-        # pre-defined paths for python executable
+        # convert to Path for easier processing
+        path_py = Path(path_py)
+
         if platform.system() == "Windows":
+            # sys.executable is always the most reliable starting point
+            exe = Path(sys.executable)
             candidates = [
-                path_py
-                / (
-                    "../../bin/pythonw.exe" if version.parse(str_ver_qgis) >= version.parse("3.9.1")
-                    else "pythonw.exe"
-                ),
+                # prefer pythonw.exe next to the running python.exe
+                exe.with_name("pythonw.exe"),
+                # OSGeo4W layout: PYTHONHOME = …\apps\Python312, binaries in …\bin\
+                path_py / "../../bin/pythonw.exe",
+                path_py / "../../bin/python.exe",
+                # fallback: same directory as PYTHONHOME
                 path_py.with_name("pythonw.exe"),
+                path_py.with_name("python.exe"),
+                # last resort: the running interpreter itself
+                exe,
             ]
         else:
             candidates = [
@@ -117,11 +123,20 @@ def locate_py():
                 path_py / "bin" / "python",
                 path_py.with_name("python3"),
                 path_py.with_name("python"),
+                Path(sys.executable),
             ]
         for candidate_path in candidates:
-            if candidate_path.exists():
-                log(f"Python interpreter is located in {candidate_path}")
-                return candidate_path
+            try:
+                resolved = candidate_path.resolve()
+                if resolved.exists():
+                    log(f"Python interpreter is located in {resolved}")
+                    return resolved
+            except Exception:
+                continue
+        # absolute last resort: return the running interpreter
+        fallback = Path(sys.executable)
+        log(f"Python interpreter fallback: {fallback}")
+        return fallback
 
 def add_venv(prefix_path,venv_path,plugin_venv,interpreter="python"):
     """

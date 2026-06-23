@@ -31,6 +31,8 @@ coverage.xml
 .vscode/
 .project
 .pydevproject
+pyrightconfig.json
+.claude/
 
 # OS
 .DS_Store

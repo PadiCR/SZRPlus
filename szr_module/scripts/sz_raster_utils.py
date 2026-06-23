@@ -444,20 +444,20 @@ def save_roc_fit(y_true, scores, out_folder, label='fit', method_tag='', base_st
         fpr, tpr, _ = roc_curve(y_true, scores)
         
         best_dis, best_csi = _export_roc_and_sr(y_true, scores, out_folder, prefix=f"{tag}fit_", extra_stats=base_stats)
-        label_text = f'Complete dataset (AUC = {auc_val:.2f}'
         if best_dis is not None:
-            label_text += f', min DIS = {best_dis:.2f}, max CSI = {best_csi:.2f})'
+            label_text = 'Complete: AUC=%.2f, DIS=%.2f, CSI=%.2f' % (auc_val, best_dis, best_csi)
         else:
-            label_text += ')'
+            label_text = 'Complete: AUC=%.2f' % auc_val
             
         ax.plot(fpr, tpr, color='green', lw=2, label=label_text)
         print(f'[SZ] Fit AUC = {auc_val:.4f}')
+        
+        ax.legend(loc='lower right', fontsize=8.5, framealpha=0.92, edgecolor='gray')
     except ValueError as e:
         ax.text(0.5, 0.5, f"ROC not available\n({e})", ha='center', va='center', color='red')
         print(f'[SZ] ROC Error: {e}')
 
-    ax.legend(loc='lower right')
-    fig.savefig(os.path.join(out_folder, f'{tag}fig_roc_fit.png'), dpi=150)
+    fig.savefig(os.path.join(out_folder, f'{tag}fig_roc_fit.png'), dpi=150, bbox_inches='tight')
     plt.close(fig)
 
 
@@ -481,6 +481,9 @@ def save_roc_cv(y_train, scores_train, y_test, scores_test, out_folder, method_t
     ax.set_ylabel('True Positive Rate')
     ax.set_title('ROC')
 
+    lines = []
+    labels = []
+
     try:
         aucv = roc_auc_score(y_test,  scores_test)
         fprv, tprv, _ = roc_curve(y_test,  scores_test)
@@ -489,13 +492,15 @@ def save_roc_cv(y_train, scores_train, y_test, scores_test, out_folder, method_t
         test_stats['Test Split Landslides'] = int(np.sum(y_test == 1))
         test_stats['Test Split Non-Landslides'] = int(np.sum(y_test == 0))
         dis_v, csi_v = _export_roc_and_sr(y_test, scores_test, out_folder, prefix=f"{tag}test_", extra_stats=test_stats)
-        label_test = f'Prediction performance (AUC = {aucv:.2f}'
+        
         if dis_v is not None:
-             label_test += f', min DIS = {dis_v:.2f}, max CSI = {csi_v:.2f})'
+             label_test = 'Prediction: AUC=%.2f, DIS=%.2f, CSI=%.2f' % (aucv, dis_v, csi_v)
         else:
-             label_test += ')'
+             label_test = 'Prediction: AUC=%.2f' % aucv
 
-        ax.plot(fprv, tprv, color='green', lw=2, label=label_test)
+        line_v, = ax.plot(fprv, tprv, color='green', lw=2)
+        lines.append(line_v)
+        labels.append(label_test)
         print(f'[SZ] Test AUC = {aucv:.4f}')
     except ValueError as e:
         print(f'[SZ] Test ROC Error: {e}')
@@ -508,21 +513,25 @@ def save_roc_cv(y_train, scores_train, y_test, scores_test, out_folder, method_t
         train_stats['Train Split Landslides'] = int(np.sum(y_train == 1))
         train_stats['Train Split Non-Landslides'] = int(np.sum(y_train == 0))
         dis_t, csi_t = _export_roc_and_sr(y_train, scores_train, out_folder, prefix=f"{tag}train_", extra_stats=train_stats)
-        label_train = f'Success performance (AUC = {auct:.2f}'
+        
         if dis_t is not None:
-             label_train += f', min DIS = {dis_t:.2f}, max CSI = {csi_t:.2f})'
+             label_train = 'Success:    AUC=%.2f, DIS=%.2f, CSI=%.2f' % (auct, dis_t, csi_t)
         else:
-             label_train += ')'
+             label_train = 'Success:    AUC=%.2f' % auct
              
-        ax.plot(fprt, tprt, color='red', lw=2, label=label_train)
+        line_t, = ax.plot(fprt, tprt, color='red', lw=2)
+        lines.append(line_t)
+        labels.append(label_train)
         print(f'[SZ] Train AUC = {auct:.4f}')
     except ValueError as e:
         print(f'[SZ] Train ROC Error: {e}')
-        if "aucv" not in locals(): # both failed
+        if not lines: # both failed
              ax.text(0.5, 0.5, f"ROC not available\n({e})", ha='center', va='center', color='red')
 
-    ax.legend(loc='lower right')
-    fig.savefig(os.path.join(out_folder, f'{tag}fig_roc_cv.png'), dpi=150)
+    if lines:
+        ax.legend(lines, labels, loc='lower right', fontsize=8.5, framealpha=0.92, edgecolor='gray')
+
+    fig.savefig(os.path.join(out_folder, f'{tag}fig_roc_cv.png'), dpi=150, bbox_inches='tight')
     plt.close(fig)
 
 
@@ -541,6 +550,10 @@ def save_roc_kfold(y_all, si_all, test_indices_list, out_folder, method_tag='', 
     tag = f"{method_tag}_" if method_tag else ""
     fig, ax = plt.subplots()
     ax.plot([0, 1], [0, 1], color='black', lw=2, linestyle='--')
+    
+    lines = []
+    labels = []
+    
     for i, test_idx in enumerate(test_indices_list):
         yt = y_all[test_idx]
         st = si_all[test_idx]
@@ -559,18 +572,22 @@ def save_roc_kfold(y_all, si_all, test_indices_list, out_folder, method_tag='', 
         fold_stats[f'Fold {i} Non-Landslides'] = int(np.sum(yt == 0))
         best_dis, best_csi = _export_roc_and_sr(yt, st, fold_dir, prefix=f"{tag}fold_{i}_", extra_stats=fold_stats)
         
-        label_text = f'Fold {i} (AUC = {aucv:.2f}'
         if best_dis is not None:
-             label_text += f', min DIS = {best_dis:.2f}, max CSI = {best_csi:.2f})'
+             label_text = 'Fold %d: AUC=%.2f, DIS=%.2f, CSI=%.2f' % (i, aucv, best_dis, best_csi)
         else:
-             label_text += ')'
+             label_text = 'Fold %d: AUC=%.2f' % (i, aucv)
              
-        ax.plot(fpr, tpr, lw=2, alpha=0.7, label=label_text)
+        line, = ax.plot(fpr, tpr, lw=2, alpha=0.7)
+        lines.append(line)
+        labels.append(label_text)
         print(f'[SZ] Fold {i} AUC = {aucv:.4f}')
         
     ax.set_xlim([0, 1]); ax.set_ylim([0, 1.05])
     ax.set_xlabel('False Positive Rate')
     ax.set_ylabel('True Positive Rate')
-    ax.legend(loc='lower right', prop={'size': 6})
-    fig.savefig(os.path.join(out_folder, f'{tag}fig_roc_kfold.png'), dpi=150)
+    
+    if lines:
+        ax.legend(lines, labels, loc='lower right', fontsize=7, framealpha=0.92, edgecolor='gray')
+            
+    fig.savefig(os.path.join(out_folder, f'{tag}fig_roc_kfold.png'), dpi=150, bbox_inches='tight')
     plt.close(fig)

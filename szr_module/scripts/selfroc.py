@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 
 """
 /***************************************************************************
@@ -274,19 +274,24 @@ class rocGenerator(QgsProcessingAlgorithm):
         f1_tot = f1_score(y_true, suscept01)
         ck_tot = cohen_kappa_score(y_true, suscept01)
 
-        fig=plt.figure()
+        label_text = 'Complete: AUC=%.2f, f1=%.2f, ckappa=%.2f' % (r, f1_tot, ck_tot)
+
+        fig, ax = plt.subplots()
         lw = 2
-        plt.plot(fpr1, tpr1, color='green',lw=lw, label= 'Complete dataset (AUC = %0.2f, f1 = %0.2f, ckappa = %0.2f)' %(r, f1_tot,ck_tot))
-        plt.plot([0, 1], [0, 1], color='black', lw=lw, linestyle='--')
-        plt.xlim([0.0, 1.0])
-        plt.ylim([0.0, 1.05])
-        plt.xlabel('False Positive Rate')
-        plt.ylabel('True Positive Rate')
-        plt.title('ROC')
-        plt.legend(loc="lower right")
-        try:
-            fig.savefig(parameters['OUT']+'/roc.png')
-        except:
-            os.mkdir(parameters['OUT'])
-            fig.savefig(parameters['OUT']+'/roc.png')
+        line1, = ax.plot(fpr1, tpr1, color='green', lw=lw)
+        ax.plot([0, 1], [0, 1], color='black', lw=lw, linestyle='--')
+        ax.set_xlim([0.0, 1.0])
+        ax.set_ylim([0.0, 1.05])
+        ax.set_xlabel('False Positive Rate')
+        ax.set_ylabel('True Positive Rate')
+        ax.set_title('ROC')
+        ax.legend(
+            [line1], [label_text],
+            loc='lower right',
+            fontsize=8.5, framealpha=0.92, edgecolor='gray'
+        )
+
+        os.makedirs(parameters['OUT'], exist_ok=True)
+        fig.savefig(parameters['OUT']+'/roc.png', dpi=150, bbox_inches='tight')
+        plt.close(fig)
 

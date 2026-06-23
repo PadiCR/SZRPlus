@@ -159,7 +159,7 @@ class SZ_utils():
         df_sr.to_csv(os.path.join(out_folder, f'{prefix}SuccessRate_data.csv'), index=False)
 
         fig, ax = plt.subplots()
-        ax.plot(x_sr, y_sr, color='blue', lw=2, label=f'Success Rate')
+        line_sr, = ax.plot(x_sr, y_sr, color='blue', lw=2)
         ax.plot([0, 1], [0, 1], color='black', lw=2, linestyle='--')
         ax.set_xlim([0.0, 1.0])
         ax.set_ylim([0.0, 1.05])
@@ -168,7 +168,14 @@ class SZ_utils():
         
         title_sr = 'Success Rate Curve' if not prefix.startswith('test') else 'Prediction Rate Curve'
         ax.set_title(f'{title_sr}')
-        ax.legend(loc="lower right")
+        leg = ax.legend(
+            [line_sr], ['Success Rate'],
+            loc='lower right',
+            bbox_to_anchor=(0.99, 0.03),
+            bbox_transform=ax.transAxes,
+            fontsize=8.5, framealpha=0.92, edgecolor='gray',
+        )
+        leg.set_clip_on(False)
         fig.savefig(os.path.join(out_folder, f'{prefix}fig_success_rate.png'), dpi=150)
         plt.close(fig)
 
@@ -186,25 +193,28 @@ class SZ_utils():
         r=roc_auc_score(y_true, scores)
         
         best_dis, best_csi = SZ_utils.export_roc_and_sr(y_true, scores, parameters['OUT'], prefix="fit_")
-        label_text = 'Complete dataset (AUC = %0.2f' % r
         if best_dis is not None:
-            label_text += ', min DIS = %0.2f, max CSI = %0.2f)' % (best_dis, best_csi)
+            label_text = 'Complete: AUC=%.2f, DIS=%.2f, CSI=%.2f' % (r, best_dis, best_csi)
         else:
-            label_text += ')'
+            label_text = 'Complete: AUC=%.2f' % r
 
-        fig=plt.figure()
+        fig, ax = plt.subplots()
         lw = 2
-        plt.plot(fpr1, tpr1, color='green',lw=lw, label=label_text)
-        plt.plot([0, 1], [0, 1], color='black', lw=lw, linestyle='--')
-        plt.xlim([0.0, 1.0])
-        plt.ylim([0.0, 1.05])
-        plt.xlabel('False Positive Rate')
-        plt.ylabel('True Positive Rate')
-        plt.title('ROC')
-        plt.legend(loc="lower right")
+        line1, = ax.plot(fpr1, tpr1, color='green', lw=lw)
+        ax.plot([0, 1], [0, 1], color='black', lw=lw, linestyle='--')
+        ax.set_xlim([0.0, 1.0])
+        ax.set_ylim([0.0, 1.05])
+        ax.set_xlabel('False Positive Rate')
+        ax.set_ylabel('True Positive Rate')
+        ax.set_title('ROC')
+        ax.legend(
+            [line1], [label_text],
+            loc='lower right',
+            fontsize=8.5, framealpha=0.92, edgecolor='gray'
+        )
         
         os.makedirs(parameters['OUT'], exist_ok=True)
-        fig.savefig(parameters['OUT']+'/fig_fit.png', dpi=150)
+        fig.savefig(parameters['OUT']+'/fig_fit.png', dpi=150, bbox_inches='tight')
         plt.close(fig)
 
     def stamp_cv(parameters):
@@ -214,12 +224,14 @@ class SZ_utils():
         scores_v=df['SI']
         lw = 2
         ################################figure
-        fig=plt.figure()
-        plt.plot([0, 1], [0, 1], color='black', lw=lw, linestyle='--')
+        fig, ax = plt.subplots()
+        ax.plot([0, 1], [0, 1], color='black', lw=lw, linestyle='--')
         
         base_out = parameters['OUT']
         os.makedirs(base_out, exist_ok=True)
         
+        lines = []
+        labels = []
         for i in range(len(test_ind)):
             fold_dir = os.path.join(base_out, f'fold_{i}')
             os.makedirs(fold_dir, exist_ok=True)
@@ -229,23 +241,24 @@ class SZ_utils():
             
             best_dis, best_csi = SZ_utils.export_roc_and_sr(y_v[test_ind[i]], scores_v[test_ind[i]], fold_dir, prefix=f"fold_{i}_")
             
-            label_text = f'ROC fold {i} (AUC = {aucv:.2f}'
             if best_dis is not None:
-                label_text += f', min DIS = {best_dis:.2f}, max CSI = {best_csi:.2f})'
+                label_text = 'Fold %d: AUC=%.2f, DIS=%.2f, CSI=%.2f' % (i, aucv, best_dis, best_csi)
             else:
-                label_text += ')'
+                label_text = 'Fold %d: AUC=%.2f' % (i, aucv)
                 
             print(f'ROC {i} AUC=',aucv)
-            plt.plot(fprv, tprv,lw=lw, alpha=0.5, label=label_text)
+            line, = ax.plot(fprv, tprv, lw=lw, alpha=0.5)
+            lines.append(line)
+            labels.append(label_text)
             
-        plt.xlim([0.0, 1.0])
-        plt.ylim([0.0, 1.05])
-        plt.xlabel('False Positive Rate')
-        plt.ylabel('True Positive Rate')
-        plt.legend(loc="lower right", prop={'size': 6})
-        #plt.show()
+        ax.set_xlim([0.0, 1.0])
+        ax.set_ylim([0.0, 1.05])
+        ax.set_xlabel('False Positive Rate')
+        ax.set_ylabel('True Positive Rate')
+        if lines:
+            ax.legend(lines, labels, loc='lower right', fontsize=7, framealpha=0.92, edgecolor='gray')
         print('ROC curve figure = ',base_out+'/fig_cv.png')
-        fig.savefig(os.path.join(base_out, 'fig_cv.png'), dpi=150)
+        fig.savefig(os.path.join(base_out, 'fig_cv.png'), dpi=150, bbox_inches='tight')
         plt.close(fig)
 
     
@@ -273,29 +286,31 @@ class SZ_utils():
         dis_v, csi_v = SZ_utils.export_roc_and_sr(y_v, scores_v, base_out, prefix="test_")
         dis_t, csi_t = SZ_utils.export_roc_and_sr(y_t, scores_t, base_out, prefix="train_")
 
-        label_test = 'Prediction performance (AUC = %0.2f' % aucv
         if dis_v is not None:
-             label_test += ', min DIS = %0.2f, max CSI = %0.2f)' % (dis_v, csi_v)
+            label_test = 'Prediction: AUC=%.2f, DIS=%.2f, CSI=%.2f' % (aucv, dis_v, csi_v)
         else:
-             label_test += ')'
+            label_test = 'Prediction: AUC=%.2f' % aucv
              
-        label_train = 'Success performance (AUC = %0.2f' % auct
         if dis_t is not None:
-             label_train += ', min DIS = %0.2f, max CSI = %0.2f)' % (dis_t, csi_t)
+            label_train = 'Success:    AUC=%.2f, DIS=%.2f, CSI=%.2f' % (auct, dis_t, csi_t)
         else:
-             label_train += ')'
+            label_train = 'Success:    AUC=%.2f' % auct
 
-        fig=plt.figure()
-        plt.plot(fprv, tprv, color='green',lw=lw, label=label_test)
-        plt.plot(fprt, tprt, color='red',lw=lw, label=label_train)
-        plt.plot([0, 1], [0, 1], color='black', lw=lw, linestyle='--')
-        plt.xlim([0.0, 1.0])
-        plt.ylim([0.0, 1.05])
-        plt.xlabel('False Positive Rate')
-        plt.ylabel('True Positive Rate')
-        plt.title('ROC')
-        plt.legend(loc="lower right")
-        fig.savefig(os.path.join(base_out, 'fig_simple.png'), dpi=150)
+        fig, ax = plt.subplots()
+        line_v, = ax.plot(fprv, tprv, color='green', lw=lw)
+        line_t, = ax.plot(fprt, tprt, color='red',   lw=lw)
+        ax.plot([0, 1], [0, 1], color='black', lw=lw, linestyle='--')
+        ax.set_xlim([0.0, 1.0])
+        ax.set_ylim([0.0, 1.05])
+        ax.set_xlabel('False Positive Rate')
+        ax.set_ylabel('True Positive Rate')
+        ax.set_title('ROC')
+        ax.legend(
+            [line_v, line_t], [label_test, label_train],
+            loc='lower right',
+            fontsize=8.5, framealpha=0.92, edgecolor='gray'
+        )
+        fig.savefig(os.path.join(base_out, 'fig_simple.png'), dpi=150, bbox_inches='tight')
         plt.close(fig)
 
     def save(parameters):
