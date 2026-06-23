@@ -41,12 +41,10 @@ SZR+ can be installed manually into QGIS.
 *   **Dependencies**: `scikit-learn`, `libpysal` (Usually handled by the built-in installer).
 
 ### Install from ZIP (Recommended)
-1.  Download this repository as a ZIP file and extract it.
-2.  Locate the `szr_module` folder.
-3.  **Important**: Create a new ZIP file that contains *only* the `szr_module` folder itself.
-4.  In QGIS, go to **Plugins** > **Manage and Install Plugins...**
-5.  Select **Install from ZIP** on the left sidebar.
-6.  Select your new `szr_module.zip` and click **Install Plugin**.
+1. Download the pre-packaged [**`szr_module.zip`**](szr_module.zip) directly from the root of this repository.
+2. In QGIS, go to **Plugins** > **Manage and Install Plugins...**
+3. Select **Install from ZIP** on the left sidebar.
+4. Select the downloaded `szr_module.zip` and click **Install Plugin**.
 
 ### Manual Install (Copy/Paste)
 1.  Download this repository as a ZIP file and extract it.
