@@ -31,6 +31,8 @@ __copyright__ = '(C) 2026 by Cristobal A. Padilla Moreno'
 
 import os
 import tempfile
+from osgeo import gdal
+gdal.SetConfigOption('GDAL_MEM_ENABLE_OPEN', 'YES')
 from qgis.PyQt import uic
 from qgis.PyQt.QtWidgets import (
     QDialog, QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
@@ -192,16 +194,245 @@ class WorkerThread(QThread):
             self.error.emit(e)
 
 
+def load_as_memory_layer(filepath, layername_in_file, display_name):
+    """Load a vector layer from file (e.g. gpkg, shp) and copy all fields/features into a RAM memory layer."""
+    from qgis.core import QgsVectorLayer, QgsWkbTypes, QgsFeature, QgsField
+    import os
+    if not os.path.exists(filepath):
+        return None
+    # Load the temporary file layer
+    file_layer = QgsVectorLayer(f"{filepath}|layername={layername_in_file}" if filepath.endswith(".gpkg") else filepath, "temp_file_lyr", "ogr")
+    if not file_layer.isValid():
+        # Maybe it's not a gpkg layer or didn't require layername
+        file_layer = QgsVectorLayer(filepath, "temp_file_lyr", "ogr")
+        if not file_layer.isValid():
+            return None
+        
+    # Get crs and geometry type
+    crs_str = file_layer.crs().authid()
+    geom_type = QgsWkbTypes.displayString(file_layer.wkbType())
+    
+    # Create memory layer
+    uri = f"{geom_type}?crs={crs_str}"
+    mem_layer = QgsVectorLayer(uri, display_name, "memory")
+    provider = mem_layer.dataProvider()
+    
+    # Add fields
+    provider.addAttributes(file_layer.fields())
+    mem_layer.updateFields()
+    
+    # Add features
+    features = []
+    for feat in file_layer.getFeatures():
+        features.append(QgsFeature(feat))
+    provider.addFeatures(features)
+    mem_layer.updateExtents()
+    
+    return mem_layer
+
+
+def csv_to_memory_layer(csv_path, display_name):
+    """Load a CSV file, parse header/rows, and create an in-memory geometryless scratch table layer."""
+    import csv
+    import os
+    from qgis.core import QgsVectorLayer, QgsField, QgsFeature
+    from qgis.PyQt.QtCore import QVariant
+    import pandas as pd
+    import numpy as np
+    
+    if not os.path.exists(csv_path):
+        return None
+        
+    try:
+        with open(csv_path, 'r', newline='', encoding='utf-8', errors='ignore') as f:
+            reader = csv.reader(f)
+            header = next(reader, None)
+            if not header:
+                return None
+            rows = list(reader)
+    except Exception:
+        return None
+        
+    # Create memory layer with no geometry
+    uri = "None"
+    layer = QgsVectorLayer(uri, display_name, "memory")
+    provider = layer.dataProvider()
+    
+    # Add fields
+    fields = []
+    for col in header:
+        # Check if column values look numeric
+        is_num = True
+        for row in rows[:10]:
+            if len(row) > header.index(col):
+                val = row[header.index(col)].strip()
+                if not val:
+                    continue
+                try:
+                    float(val)
+                except ValueError:
+                    is_num = False
+                    break
+        if is_num:
+            fields.append(QgsField(col, QVariant.Double))
+        else:
+            fields.append(QgsField(col, QVariant.String))
+            
+    provider.addAttributes(fields)
+    layer.updateFields()
+    
+    # Add features
+    features = []
+    for row in rows:
+        fet = QgsFeature(layer.fields())
+        attrs = []
+        for col_idx, col in enumerate(header):
+            if col_idx < len(row):
+                val = row[col_idx].strip()
+                if val == "":
+                    attrs.append(None)
+                else:
+                    try:
+                        attrs.append(float(val))
+                    except ValueError:
+                        attrs.append(val)
+            else:
+                attrs.append(None)
+        fet.setAttributes(attrs)
+        features.append(fet)
+        
+    provider.addFeatures(features)
+    return layer
+
+
+class ChartsDialog(QDialog):
+    def __init__(self, folder, algo_name, is_temp, parent=None):
+        super().__init__(parent)
+        self.folder = folder
+        self.algo_name = algo_name
+        self.is_temp = is_temp
+        self.saved_charts = set()
+        self.pngs = []
+        
+        self.setWindowTitle(f"Results Charts - {algo_name}")
+        self.resize(850, 700)
+        
+        layout = QVBoxLayout(self)
+        
+        # Tab widget for charts
+        self.tabs = QTabWidget()
+        layout.addWidget(self.tabs)
+        
+        # Find all pngs in folder
+        import glob
+        self.png_paths = sorted(glob.glob(os.path.join(folder, "*.png")))
+        
+        # Friendly name mapping
+        friendly_names = {
+            "fig_simple.png": "ROC Curve",
+            "fig_fit.png": "ROC Curve (Fit)",
+            "fig_cv.png": "K-Fold ROC Curve",
+            "test_fig_success_rate.png": "Success Rate (Test)",
+            "train_fig_success_rate.png": "Success Rate (Train)",
+            "fit_fig_success_rate.png": "Success Rate (Fit)",
+            "fig_success_rate.png": "Success Rate Curve"
+        }
+        
+        for p in self.png_paths:
+            base = os.path.basename(p)
+            # Support prepended tag (e.g. RF_fig_roc_cv.png)
+            stripped_base = base
+            for tag in ["WoE_", "FR_", "LR_", "RF_", "SVM_", "DT_", "ROC_Gen_"]:
+                if stripped_base.startswith(tag):
+                    stripped_base = stripped_base[len(tag):]
+                    break
+            
+            title = friendly_names.get(stripped_base, base)
+            
+            # Create a scroll area for the image
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            
+            lbl = QLabel()
+            pix = QPixmap(p)
+            lbl.setPixmap(pix)
+            lbl.setAlignment(Qt.AlignCenter)
+            scroll.setWidget(lbl)
+            
+            self.tabs.addTab(scroll, title)
+            self.pngs.append((p, title))
+            
+        # Buttons layout
+        btn_layout = QHBoxLayout()
+        
+        self.btn_save = QPushButton("Save Current Chart...")
+        self.btn_save.clicked.connect(self.save_current)
+        btn_layout.addWidget(self.btn_save)
+        
+        self.btn_close = QPushButton("Close")
+        self.btn_close.clicked.connect(self.accept)
+        btn_layout.addWidget(self.btn_close)
+        
+        layout.addLayout(btn_layout)
+        
+    def save_current(self):
+        idx = self.tabs.currentIndex()
+        if idx < 0 or idx >= len(self.pngs):
+            return
+        p, title = self.pngs[idx]
+        
+        default_name = os.path.basename(p)
+        dest, _ = QFileDialog.getSaveFileName(self, f"Save {title}", default_name, "PNG Image (*.png)")
+        if dest:
+            import shutil
+            try:
+                shutil.copy(p, dest)
+                self.saved_charts.add(p)
+                QMessageBox.information(self, "Success", f"Chart saved to:\n{dest}")
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Failed to save chart: {e}")
+                
+    def closeEvent(self, event):
+        # Check if there are unsaved charts and if the folder is temporary
+        if self.is_temp and len(self.saved_charts) < len(self.png_paths):
+            # Check if parent has "don't ask again" set
+            main_dialog = self.parent()
+            dont_ask = False
+            if main_dialog and hasattr(main_dialog, '_dont_ask_save_png'):
+                dont_ask = main_dialog._dont_ask_save_png
+                
+            if not dont_ask:
+                msg = QMessageBox(self)
+                msg.setIcon(QMessageBox.Question)
+                msg.setText("The charts will be lost if you close this window without saving. Do you want to save them?")
+                msg.setWindowTitle("Unsaved Charts")
+                
+                save_btn = msg.addButton("Save Active Chart...", QMessageBox.AcceptRole)
+                dont_save_btn = msg.addButton("Don't Save", QMessageBox.DestructiveRole)
+                cancel_btn = msg.addButton(QMessageBox.Cancel)
+                
+                cb = QCheckBox("Do not ask me again during this session")
+                msg.setCheckBox(cb)
+                
+                msg.exec_()
+                
+                if msg.clickedButton() == save_btn:
+                    event.ignore()
+                    self.save_current()
+                    return
 class ProcessingOutputWidget(QWidget):
     fileChanged = pyqtSignal(str)
 
-    def __init__(self, title, is_folder=False, filter="All files (*)"):
+    def __init__(self, title, is_folder=False, filter="All files (*)", default_text=None, is_optional=False, force_physical=False):
         super().__init__()
         self.is_folder = is_folder
         self.title = title
         self.filter = filter
-        self.is_temp = True
+        self.is_optional = is_optional
+        self.force_physical = force_physical
+        self.is_temp = not is_optional and not force_physical
         self._filepath = ""
+        self.default_text = default_text
         
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -209,7 +440,16 @@ class ProcessingOutputWidget(QWidget):
         self.line_edit = QLineEdit()
         self.line_edit.setReadOnly(True)
         self.line_edit.setStyleSheet("color: gray; font-style: italic;")
-        self.line_edit.setText("[Save to temporary folder]" if is_folder else "[Save to temporary file]")
+        
+        if self.is_optional:
+            initial_text = "[Optional]"
+        elif self.force_physical:
+            initial_text = "[Specify output folder...]" if is_folder else "[Specify output file...]"
+        elif self.default_text:
+            initial_text = self.default_text
+        else:
+            initial_text = "[Save to temporary folder]" if is_folder else "[Save to temporary file]"
+        self.line_edit.setText(initial_text)
         layout.addWidget(self.line_edit)
         
         self.tool_btn = QToolButton()
@@ -221,18 +461,37 @@ class ProcessingOutputWidget(QWidget):
         self.action_temp = QAction("Save to a Temporary File", self) if not is_folder else QAction("Save to a Temporary Folder", self)
         self.action_save = QAction("Save to File...", self) if not is_folder else QAction("Save to Directory...", self)
         
-        self.menu.addAction(self.action_temp)
+        if not self.force_physical:
+            self.menu.addAction(self.action_temp)
         self.menu.addAction(self.action_save)
+        
+        if self.is_optional:
+            self.action_optional = QAction("Optional (No Output)", self)
+            self.menu.addAction(self.action_optional)
+            self.action_optional.triggered.connect(self.set_optional)
+            
         self.tool_btn.setMenu(self.menu)
         
         self.action_temp.triggered.connect(self.set_temporary)
         self.action_save.triggered.connect(self.prompt_save)
         
     def set_temporary(self):
-        self.is_temp = True
+        self.is_temp = not self.force_physical
         self._filepath = ""
         self.line_edit.setStyleSheet("color: gray; font-style: italic;")
-        self.line_edit.setText("[Save to temporary folder]" if self.is_folder else "[Save to temporary file]")
+        if self.force_physical:
+            self.line_edit.setText("[Specify output folder...]" if self.is_folder else "[Specify output file...]")
+        elif self.default_text:
+            self.line_edit.setText(self.default_text)
+        else:
+            self.line_edit.setText("[Save to temporary folder]" if self.is_folder else "[Save to temporary file]")
+        self.fileChanged.emit("")
+        
+    def set_optional(self):
+        self.is_temp = False
+        self._filepath = ""
+        self.line_edit.setStyleSheet("color: gray; font-style: italic;")
+        self.line_edit.setText("[Optional]")
         self.fileChanged.emit("")
         
     def prompt_save(self):
@@ -256,15 +515,18 @@ class ProcessingOutputWidget(QWidget):
             self.line_edit.setText(path)
             self.fileChanged.emit(path)
         else:
-            self.set_temporary()
-
-
-def _folder_widget(title="Output folder"):
-    return ProcessingOutputWidget(title, is_folder=True)
-
-
-def _file_widget_temp(title="", filter_="All files (*)"):
-    w = ProcessingOutputWidget(title, is_folder=False, filter=filter_)
+            if self.is_optional:
+                self.set_optional()
+            else:
+                self.set_temporary()
+ 
+ 
+def _folder_widget(title="Output folder", default_text=None, force_physical=False):
+    return ProcessingOutputWidget(title, is_folder=True, default_text=default_text, force_physical=force_physical)
+ 
+ 
+def _file_widget_temp(title="", filter_="All files (*)", is_optional=False, force_physical=False):
+    w = ProcessingOutputWidget(title, is_folder=False, filter=filter_, is_optional=is_optional, force_physical=force_physical)
     class DummyCheck:
         def __init__(self, w): self.w = w
         def isChecked(self): return self.w.is_temp
@@ -504,23 +766,33 @@ def _make_raster_page(algo_name: str):
         sp_layout.addLayout(_labeled(spin_lbl, spin))
 
         # Output SI raster
-        out_raster_widget, out_raster_refs = _file_widget_temp("Output Susceptibility Index (SI) Raster", "GeoTIFF (*.tif *.tiff)")
+        out_raster_widget, out_raster_refs = _file_widget_temp("Output Susceptibility Index (SI) Raster", "GeoTIFF (*.tif *.tiff)", force_physical=True)
         sp_layout.addLayout(_labeled("Output Susceptibility Index (SI) Raster", out_raster_widget))
 
-        out_test_widget, out_test_refs = _file_widget_temp("Output Test/Train Raster", "GeoTIFF (*.tif *.tiff)")
+        out_test_widget, out_test_refs = _file_widget_temp("Output Test/Train Raster", "GeoTIFF (*.tif *.tiff)", is_optional=True, force_physical=True)
         sp_layout.addLayout(_labeled("Output Test/Train Raster (optional)", out_test_widget))
 
         # Output folder
-        if 'WoE' in algo_name or 'FR' in algo_name:
-            folder_lbl = "Additional outputs folder (ROC, AUC, Weights)"
-        elif 'LR' in algo_name or 'SVM' in algo_name:
-            folder_lbl = "Additional outputs folder (ROC, AUC, Coefficients)"
-        elif 'RF' in algo_name or 'DT' in algo_name:
-            folder_lbl = "Additional outputs folder (ROC, AUC, Feature Importance)"
+        if mode == "kfold":
+            if 'WoE' in algo_name or 'FR' in algo_name:
+                folder_lbl = "Additional outputs folder (ROC, SR + Weights for each k-fold)"
+            elif 'LR' in algo_name or 'SVM' in algo_name:
+                folder_lbl = "Additional outputs folder (ROC, SR + Coefficients for each k-fold)"
+            elif 'RF' in algo_name or 'DT' in algo_name:
+                folder_lbl = "Additional outputs folder (ROC, SR + Feature Importance for each k-fold)"
+            else:
+                folder_lbl = "Additional outputs folder (ROC, SR + etc for each k-fold)"
         else:
-            folder_lbl = "Additional outputs folder (ROC, AUC, etc)"
+            if 'WoE' in algo_name or 'FR' in algo_name:
+                folder_lbl = "Additional outputs folder (ROC, SR, Weights)"
+            elif 'LR' in algo_name or 'SVM' in algo_name:
+                folder_lbl = "Additional outputs folder (ROC, SR, Coefficients)"
+            elif 'RF' in algo_name or 'DT' in algo_name:
+                folder_lbl = "Additional outputs folder (ROC, SR, Feature Importance)"
+            else:
+                folder_lbl = "Additional outputs folder (ROC, SR, etc)"
             
-        out_folder = _folder_widget(folder_lbl)
+        out_folder = _folder_widget(folder_lbl, force_physical=True)
         sp_layout.addLayout(_labeled(folder_lbl, out_folder))
         
         # Auto-fill output folder if empty
@@ -621,33 +893,71 @@ def _make_vector_page(algo_name: str):
         if mode == "binomial":
             spin_lbl = "Percentage of test sample  (0 = fit only)"
         else:
-            spin_lbl = "Number of k-folds  (≥ 2)"
+            spin_lbl = "Number  of k-folds (1 to fit or >1 Corss validate)"
         spin = QSpinBox()
-        spin.setRange(0, 99) if mode == "binomial" else spin.setRange(2, 50)
+        spin.setRange(0, 99) if mode == "binomial" else spin.setRange(1, 50)
         spin.setValue(30) if mode == "binomial" else spin.setValue(5)
         sp_layout.addLayout(_labeled(spin_lbl, spin))
 
         # Output vector
-        out_vec_test_widget, out_vec_test_refs = _file_widget_temp("Output Test GeoPackage", "GeoPackage (*.gpkg)")
-        sp_layout.addLayout(_labeled("Output Test GeoPackage", out_vec_test_widget))
+        if mode == "binomial":
+            out_vec_test_widget, out_vec_test_refs = _file_widget_temp("Output Test GeoPackage", "GeoPackage (*.gpkg)", is_optional=True)
+            sp_layout.addLayout(_labeled("Output Test GeoPackage", out_vec_test_widget))
 
-        out_vec_train_widget, out_vec_train_refs = _file_widget_temp("Output Train/Fit GeoPackage", "GeoPackage (*.gpkg)")
-        sp_layout.addLayout(_labeled("Output Train/Fit GeoPackage", out_vec_train_widget))
-
-        if 'WoE' in algo_name or 'FR' in algo_name:
-            folder_lbl = "Additional outputs folder (ROC, AUC, Weights)"
-        elif 'LR' in algo_name or 'SVM' in algo_name:
-            folder_lbl = "Additional outputs folder (ROC, AUC, Coefficients)"
-        elif 'RF' in algo_name or 'DT' in algo_name:
-            folder_lbl = "Additional outputs folder (ROC, AUC, Feature Importance)"
+            out_vec_train_widget, out_vec_train_refs = _file_widget_temp("Output Train/Fit GeoPackage", "GeoPackage (*.gpkg)", is_optional=True)
+            sp_layout.addLayout(_labeled("Output Train/Fit GeoPackage", out_vec_train_widget))
         else:
-            folder_lbl = "Additional outputs folder (ROC, AUC, etc)"
+            # kfold mode
+            out_vec_test_widget, out_vec_test_refs = _file_widget_temp("Output test/fit", "GeoPackage (*.gpkg)", is_optional=True)
+            sp_layout.addLayout(_labeled("Output test/fit", out_vec_test_widget))
+            out_vec_train_widget = None
+            out_vec_train_refs = None
+
+        if mode == "kfold":
+            if 'WoE' in algo_name or 'FR' in algo_name:
+                folder_lbl = "Additional outputs folder (ROC, SR + Weights for each k-fold)"
+            elif 'LR' in algo_name or 'SVM' in algo_name:
+                folder_lbl = "Additional outputs folder (ROC, SR + Coefficients for each k-fold)"
+            elif 'RF' in algo_name or 'DT' in algo_name:
+                folder_lbl = "Additional outputs folder (ROC, SR + Feature Importance for each k-fold)"
+            else:
+                folder_lbl = "Additional outputs folder (ROC, SR + etc for each k-fold)"
+        else:
+            if 'WoE' in algo_name or 'FR' in algo_name:
+                folder_lbl = "Additional outputs folder (ROC, SR, Weights)"
+            elif 'LR' in algo_name or 'SVM' in algo_name:
+                folder_lbl = "Additional outputs folder (ROC, SR, Coefficients)"
+            elif 'RF' in algo_name or 'DT' in algo_name:
+                folder_lbl = "Additional outputs folder (ROC, SR, Feature Importance)"
+            else:
+                folder_lbl = "Additional outputs folder (ROC, SR, etc)"
             
-        out_folder = _folder_widget(folder_lbl)
+        out_folder = _folder_widget(folder_lbl, default_text="[only ROC will be saved as temporary file]" if mode == "kfold" else None)
         sp_layout.addLayout(_labeled(folder_lbl, out_folder))
         
-        # Link Train GeoPackage folder to output folder if empty
-        out_vec_train_refs['fw'].fileChanged.connect(lambda path, f=out_folder: f.setFilePath(os.path.dirname(path)) if path and not f.filePath() else None)
+        # Link outputs to folder autocomplete
+        def auto_populate_folder():
+            if out_folder.filePath():
+                return
+            if mode == "binomial":
+                pct = spin.value()
+                if pct > 0:
+                    test_path = out_vec_test_refs['fw'].filePath()
+                    if test_path:
+                        out_folder.setFilePath(os.path.dirname(test_path))
+                else:
+                    train_path = out_vec_train_refs['fw'].filePath()
+                    if train_path:
+                        out_folder.setFilePath(os.path.dirname(train_path))
+            else:
+                test_path = out_vec_test_refs['fw'].filePath()
+                if test_path:
+                    out_folder.setFilePath(os.path.dirname(test_path))
+
+        out_vec_test_refs['fw'].fileChanged.connect(lambda path: auto_populate_folder() if path else None)
+        if out_vec_train_refs is not None:
+            out_vec_train_refs['fw'].fileChanged.connect(lambda path: auto_populate_folder() if path else None)
+        spin.valueChanged.connect(lambda val: auto_populate_folder())
 
         run_btn = QPushButton(f"RUN  —  {algo_name}")
         run_btn.setStyleSheet(
@@ -740,6 +1050,7 @@ class SzEduDialog(QDialog, FORM_CLASS):
 
         self._is_running = False
         self._workers = []
+        self._mem_datasets = {}
 
         # Storage for widget references
         self._raster_refs = {}   # key: algo_name str -> {'binomial':…, 'kfold':…}
@@ -1035,6 +1346,156 @@ class SzEduDialog(QDialog, FORM_CLASS):
                 worker.terminate()
                 worker.wait()
         self._workers.clear()
+
+    def load_raster_as_memory_layer(self, disk_path, display_name):
+        """Copy a temporary raster file from disk into GDAL's MEM driver,
+        load it into QGIS as a RAM-resident layer, and clean up the disk file.
+        Keeps the MEM dataset alive in self._mem_datasets.
+        """
+        from osgeo import gdal
+        from qgis.core import QgsRasterLayer, QgsProject
+        from qgis.PyQt.QtWidgets import QMessageBox, QFileDialog
+        import os
+        import uuid
+
+        if not os.path.exists(disk_path):
+            return None
+
+        # 1. Open the source dataset
+        src_ds = gdal.Open(disk_path)
+        if not src_ds:
+            return None
+
+        # 2. Check available RAM
+        width = src_ds.RasterXSize
+        height = src_ds.RasterYSize
+        bands = src_ds.RasterCount
+        datatype = src_ds.GetRasterBand(1).DataType
+        
+        # Calculate size in bytes
+        type_sizes = {
+            gdal.GDT_Byte: 1,
+            gdal.GDT_UInt16: 2,
+            gdal.GDT_Int16: 2,
+            gdal.GDT_UInt32: 4,
+            gdal.GDT_Int32: 4,
+            gdal.GDT_Float32: 4,
+            gdal.GDT_Float64: 8
+        }
+        bytes_per_pixel = type_sizes.get(datatype, 4)
+        size_bytes = width * height * bands * bytes_per_pixel
+        
+        # Get available memory
+        avail_bytes = 1024 * 1024 * 1024 # default fallback 1GB
+        try:
+            import psutil
+            avail_bytes = psutil.virtual_memory().available
+        except:
+            try:
+                import ctypes
+                class MEMORYSTATUSEX(ctypes.Structure):
+                    _fields_ = [
+                        ('dwLength', ctypes.c_ulong),
+                        ('dwMemoryLoad', ctypes.c_ulong),
+                        ('ullTotalPhys', ctypes.c_ulonglong),
+                        ('ullAvailPhys', ctypes.c_ulonglong),
+                        ('ullTotalPageFile', ctypes.c_ulonglong),
+                        ('ullAvailPageFile', ctypes.c_ulonglong),
+                        ('ullTotalVirtual', ctypes.c_ulonglong),
+                        ('ullAvailVirtual', ctypes.c_ulonglong),
+                        ('ullAvailExtendedVirtual', ctypes.c_ulonglong),
+                    ]
+                stat = MEMORYSTATUSEX()
+                stat.dwLength = ctypes.sizeof(stat)
+                ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat))
+                avail_bytes = stat.ullAvailPhys
+            except:
+                pass
+
+        # 3. Verify if it fits in RAM (threshold: 70% of available RAM)
+        if size_bytes > 0.7 * avail_bytes:
+            size_mb = size_bytes / (1024 * 1024)
+            avail_mb = avail_bytes / (1024 * 1024)
+            msg = QMessageBox(self)
+            msg.setIcon(QMessageBox.Warning)
+            msg.setWindowTitle("Low Memory Warning")
+            msg.setText(
+                f"The generated raster is too big to fit in the available RAM space.\n\n"
+                f"Required: {size_mb:.1f} MB\n"
+                f"Available RAM: {avail_mb:.1f} MB\n\n"
+                f"Would you like to save it to your local drive instead?"
+            )
+            save_btn = msg.addButton("Save to Local Drive...", QMessageBox.YesRole)
+            load_temp_btn = msg.addButton("Keep as Temporary File on Disk", QMessageBox.NoRole)
+            cancel_btn = msg.addButton(QMessageBox.Cancel)
+            msg.exec_()
+
+            if msg.clickedButton() == save_btn:
+                dest_path, _ = QFileDialog.getSaveFileName(self, "Save Raster", "", "GeoTIFF (*.tif *.tiff)")
+                if dest_path:
+                    # Copy to local drive path
+                    src_ds = None
+                    import shutil
+                    try:
+                        shutil.copy(disk_path, dest_path)
+                        os.remove(disk_path)
+                    except:
+                        pass
+                    rlayer = QgsRasterLayer(dest_path, display_name)
+                    return rlayer
+                else:
+                    # User canceled file dialog, default to temporary file on disk
+                    src_ds = None
+                    rlayer = QgsRasterLayer(disk_path, display_name)
+                    return rlayer
+            elif msg.clickedButton() == load_temp_btn:
+                # Load temporary file from disk directly, do not convert to RAM and do not delete
+                src_ds = None
+                rlayer = QgsRasterLayer(disk_path, display_name)
+                return rlayer
+            else:
+                # Cancel
+                src_ds = None
+                return "CANCELLED"
+
+        # 4. Copy to GDAL MEM driver
+        gdal.SetConfigOption('GDAL_MEM_ENABLE_OPEN', 'YES')
+        mem_driver = gdal.GetDriverByName('MEM')
+        
+        unique_id = uuid.uuid4().hex
+        unique_name = f"SZ_mem_raster_{unique_id}"
+        
+        mem_ds = mem_driver.CreateCopy(unique_name, src_ds)
+        src_ds = None  # close source dataset
+
+        if not mem_ds:
+            # Fallback to loading temporary disk file
+            rlayer = QgsRasterLayer(disk_path, display_name)
+            return rlayer
+
+        # 5. Load in QGIS
+        uri = f"MEM:::{unique_name}"
+        rlayer = QgsRasterLayer(uri, display_name, "gdal")
+        if not rlayer.isValid():
+            mem_ds = None
+            rlayer = QgsRasterLayer(disk_path, display_name)
+            return rlayer
+
+        # 6. Delete disk file
+        try:
+            os.remove(disk_path)
+        except:
+            pass
+
+        # 7. Keep MEM dataset reference alive
+        if not hasattr(self, '_mem_datasets'):
+            self._mem_datasets = {}
+        self._mem_datasets[rlayer.id()] = mem_ds
+
+        # Clean up reference when layer is destroyed
+        rlayer.destroyed.connect(lambda: self._mem_datasets.pop(rlayer.id(), None))
+
+        return rlayer
 
     def _get_out_path(self, refs_dict, suffix=None, prefix=None, is_folder=False):
         if is_folder:
@@ -1378,36 +1839,36 @@ class SzEduDialog(QDialog, FORM_CLASS):
                 ("Landslide Inventory Raster", cb_roc_inv),
                 ("SI Raster", cb_roc_si),
                 ("Number of Classes (from 2 to 10)", self._spinbox(2, 10, 5)),
-                ("Output Folder (Cutoffs & Raster)", _folder_widget()),
+                ("Output Folder (Cutoffs & Raster)", _folder_widget(force_physical=True)),
             ]),
             ("Classify by Closest Point (0,1)", [
                 ("Landslide Inventory Raster", cb_cp_inv),
                 ("SI Raster", cb_cp_si),
                 ("Number of Classes (from 2 to 10)", self._spinbox(2, 10, 5)),
-                ("Output Folder (Cutoffs & Raster)", _folder_widget()),
+                ("Output Folder (Cutoffs & Raster)", _folder_widget(force_physical=True)),
             ]),
             ("Classify by F1-Score", [
                 ("Landslide Inventory Raster", cb_f1_inv),
                 ("SI Raster", cb_f1_si),
                 ("Number of Classes (from 2 to 10)", self._spinbox(2, 10, 5)),
-                ("Output Folder (Cutoffs & Raster)", _folder_widget()),
+                ("Output Folder (Cutoffs & Raster)", _folder_widget(force_physical=True)),
             ]),
             ("Classify by Threat Score (CSI)", [
                 ("Landslide Inventory Raster", cb_ts_inv),
                 ("SI Raster", cb_ts_si),
                 ("Number of Classes (from 2 to 10)", self._spinbox(2, 10, 5)),
-                ("Output Folder (Cutoffs & Raster)", _folder_widget()),
+                ("Output Folder (Cutoffs & Raster)", _folder_widget(force_physical=True)),
             ]),
             ("ROC Generator", [
                 ("Landslide Inventory Raster", cb_gen_inv),
                 ("SI Raster", cb_gen_si),
-                ("Output Folder", _folder_widget()),
+                ("Output Folder", _folder_widget(force_physical=True)),
             ]),
             ("Confusion Matrix (FP/TN Threshold)", [
                 ("Landslide Inventory Raster", cb_cm_inv),
                 ("SI Raster", cb_cm_si),
                 ("Cutoff percentile (0 = Youden)", self._spinbox(0, 100, 0)),
-                ("Output Folder (Metrics)", _folder_widget()),
+                ("Output Folder (Metrics)", _folder_widget(force_physical=True)),
             ]),
         ]
 
@@ -1472,8 +1933,19 @@ class SzEduDialog(QDialog, FORM_CLASS):
             return
         spin_val   = m_refs['spin'].value()
 
+        if m_refs['output']['fw'].is_temp:
+            QMessageBox.warning(self, "Missing output", "Please specify a file path for the Output Susceptibility Index Raster.")
+            return
+        if m_refs['folder'].is_temp:
+            QMessageBox.warning(self, "Missing output", "Please specify a directory path for the Additional Outputs Folder.")
+            return
+
+        if m_refs['out_test']['fw'].is_temp or not m_refs['out_test']['fw'].filePath():
+            out_test = None
+        else:
+            out_test = self._get_out_path(m_refs['out_test'], suffix=".tif", prefix="Test_raster_")
+
         out_raster = self._get_out_path(m_refs['output'], suffix=".tif", prefix="SI_raster_")
-        out_test = self._get_out_path(m_refs['out_test'], suffix=".tif", prefix="Test_raster_")
         out_folder = self._get_out_path(m_refs['folder'], is_folder=True)
 
         if not out_folder:
@@ -1483,20 +1955,52 @@ class SzEduDialog(QDialog, FORM_CLASS):
         algo_display = self.ALGO_NAMES[self.ALGO_KEYS_R.index(key)]
         self._set_running(f"Running {algo_display} ({mode})...")
         
+        # Method tags for files
+        METHOD_TAGS = {
+            'woe': 'WoE',
+            'fr':  'FR',
+            'lr':  'LR',
+            'rf':  'RF',
+            'svm': 'SVM',
+            'dt':  'DT',
+        }
+        method_tag = METHOD_TAGS.get(key, key.upper())
+        
         def on_finished(_):
+            is_raster_temp = m_refs['output']['fw'].is_temp
             # Auto-load SI
             if out_raster and os.path.exists(out_raster):
-                from qgis.core import QgsRasterLayer
                 lyr_name = os.path.splitext(os.path.basename(out_raster))[0]
-                lyr = QgsRasterLayer(out_raster, lyr_name)
-                if lyr.isValid():
+                if is_raster_temp:
+                    lyr = self.load_raster_as_memory_layer(out_raster, lyr_name)
+                    if lyr == "CANCELLED":
+                        lyr = None
+                else:
+                    from qgis.core import QgsRasterLayer
+                    lyr = QgsRasterLayer(out_raster, lyr_name)
+                if lyr and lyr.isValid():
                     QgsProject.instance().addMapLayer(lyr)
+
+            is_folder_temp = m_refs['folder'].is_temp
+            
+            # Load Test ROC CSV as geometryless memory layer if temporary
+            if is_folder_temp:
+                import glob
+                csv_files = glob.glob(os.path.join(out_folder, f"{method_tag}_test_ROC_data.csv"))
+                if csv_files:
+                    csv_lyr = csv_to_memory_layer(csv_files[0], f"{algo_display} ({mode}) Test ROC Data")
+                    if csv_lyr and csv_lyr.isValid():
+                        QgsProject.instance().addMapLayer(csv_lyr)
 
             self._set_finished()
             QMessageBox.information(self, "Done",
                                     f"{algo_display} ({mode}) completed successfully.\n"
                                     f"Results saved to:\n{out_folder}")
-            self._show_latest_roc_plot(out_folder, algo_display)
+                                    
+            # Show tabbed Charts Dialog
+            dlg = ChartsDialog(out_folder, algo_display, is_temp=is_folder_temp, parent=self)
+            dlg.exec_()
+            
             if worker in self._workers:
                 self._workers.remove(worker)
 
@@ -1634,28 +2138,79 @@ class SzEduDialog(QDialog, FORM_CLASS):
             return
 
         out_test = self._get_out_path(m_refs['out_test'], suffix=".gpkg", prefix="Test_vector_")
-        out_train = self._get_out_path(m_refs['out_train'], suffix=".gpkg", prefix="Train_vector_")
+        if m_refs['out_train'] is not None:
+            out_train = self._get_out_path(m_refs['out_train'], suffix=".gpkg", prefix="Train_vector_")
+        else:
+            out_train = None
 
         algo_display = self.ALGO_NAMES[self.ALGO_KEYS_R.index(key)]
         self._set_running(f"Running {algo_display} ({mode})...")
         
         def on_finished(_):
-            # Auto-load SI
-            test_path = m_refs['out_test'].filePath()
-            if not test_path:
-                import os
-                test_path = os.path.join(out_folder, 'test.gpkg')
-            if os.path.exists(test_path):
+            is_folder_temp = m_refs['folder'].is_temp
+            
+            # Load Test layer
+            test_path = m_refs['out_test']['fw'].filePath()
+            is_test_temp = m_refs['out_test']['fw'].is_temp
+            if test_path:
                 from qgis.core import QgsVectorLayer
-                lyr = QgsVectorLayer(f"{test_path}|layername=test", f"{algo_display} Vector Test SI", "ogr")
+                lyr = QgsVectorLayer(f"{test_path}|layername=test", f"{algo_display} Vector Test SI" if mode == "binomial" else f"{algo_display} Vector test/fit", "ogr")
+                if not lyr.isValid():
+                    lyr = QgsVectorLayer(test_path, f"{algo_display} Vector Test SI" if mode == "binomial" else f"{algo_display} Vector test/fit", "ogr")
                 if lyr.isValid():
                     QgsProject.instance().addMapLayer(lyr)
+            elif is_test_temp:
+                if os.path.exists(out_test):
+                    lyr = load_as_memory_layer(out_test, "test", f"{algo_display} Vector Test SI" if mode == "binomial" else f"{algo_display} Vector test/fit")
+                    if lyr and lyr.isValid():
+                        QgsProject.instance().addMapLayer(lyr)
+                    try: os.remove(out_test)
+                    except: pass
+            else:
+                if os.path.exists(out_test):
+                    try: os.remove(out_test)
+                    except: pass
+
+            # Load Train/Fit layer (only in binomial mode)
+            if mode == 'binomial':
+                train_path = m_refs['out_train']['fw'].filePath()
+                is_train_temp = m_refs['out_train']['fw'].is_temp
+                if train_path:
+                    from qgis.core import QgsVectorLayer
+                    lyr = QgsVectorLayer(f"{train_path}|layername=train", f"{algo_display} Vector Train SI", "ogr")
+                    if not lyr.isValid():
+                        lyr = QgsVectorLayer(train_path, f"{algo_display} Vector Train SI", "ogr")
+                    if lyr.isValid():
+                        QgsProject.instance().addMapLayer(lyr)
+                elif is_train_temp:
+                    if os.path.exists(out_train):
+                        lyr = load_as_memory_layer(out_train, "train", f"{algo_display} Vector Train SI")
+                        if lyr and lyr.isValid():
+                            QgsProject.instance().addMapLayer(lyr)
+                        try: os.remove(out_train)
+                        except: pass
+                else:
+                    if os.path.exists(out_train):
+                        try: os.remove(out_train)
+                        except: pass
+
+            # Load Test ROC CSV as geometryless memory layer if folder is temporary
+            if is_folder_temp:
+                import glob
+                csv_files = glob.glob(os.path.join(out_folder, "*test_ROC_data.csv"))
+                if csv_files:
+                    csv_lyr = csv_to_memory_layer(csv_files[0], f"{algo_display} ({mode}) Test ROC Data")
+                    if csv_lyr and csv_lyr.isValid():
+                        QgsProject.instance().addMapLayer(csv_lyr)
 
             self._set_finished()
             QMessageBox.information(self, "Done",
                 f"{algo_display} ({mode}) completed.\nResults in:\n{out_folder}")
             
-            self._show_latest_roc_plot(out_folder, algo_display)
+            # Show tabbed Charts Dialog
+            dlg = ChartsDialog(out_folder, algo_display, is_temp=is_folder_temp, parent=self)
+            dlg.exec_()
+            
             if worker in self._workers:
                 self._workers.remove(worker)
 
@@ -1817,7 +2372,18 @@ class SzEduDialog(QDialog, FORM_CLASS):
                 if ext_str:
                     params['exst'] = [float(x.strip()) for x in ext_str.split(',')]
                 algo_mod.processAlgorithm_edu(params)
-                self._auto_add_vector(out_shp)
+                if refs["Output Vector Layer"]["fw"].is_temp:
+                    lyr = load_as_memory_layer(out_shp, "clean", "Cleaned Points")
+                    if lyr and lyr.isValid():
+                        QgsProject.instance().addMapLayer(lyr)
+                    try:
+                        import glob
+                        for ext in ['.shp', '.shx', '.dbf', '.prj', '.cpg']:
+                            p = out_shp.replace('.shp', ext)
+                            if os.path.exists(p): os.remove(p)
+                    except: pass
+                else:
+                    self._auto_add_vector(out_shp)
 
             elif title == "Attribute Table Statistics":
                 v_layer  = refs["Input Layer (vector)"].currentLayer()
@@ -1834,6 +2400,12 @@ class SzEduDialog(QDialog, FORM_CLASS):
                 alg = statistic()
                 alg_params = { 'OUTPUT': out_csv, 'ID': id_field, 'INPUT2': v_layer.source(), 'PATH': out_folder }
                 alg.input(alg_params)
+                if refs["Output CSV"]["fw"].is_temp:
+                    lyr = csv_to_memory_layer(out_csv, "Attribute Table Statistics")
+                    if lyr and lyr.isValid():
+                        QgsProject.instance().addMapLayer(lyr)
+                    try: os.remove(out_csv)
+                    except: pass
 
             elif title == "Points Kernel Statistics":
                 v_layer = refs["Input Points Layer (vector)"].currentLayer()
@@ -1856,7 +2428,17 @@ class SzEduDialog(QDialog, FORM_CLASS):
                 XYcoord, attributi = alg.indexing(alg_params2)
                 alg_params3 = { 'OUTPUT': out_shp, 'INPUT2': XYcoord, 'INPUT': ds1, 'INPUT3': attributi, 'CRS': crs }
                 alg.saveV(alg_params3)
-                self._auto_add_vector(out_shp)
+                if refs["Output Vector Layer"]["fw"].is_temp:
+                    lyr = load_as_memory_layer(out_shp, "kernel_stats", "Points Kernel Statistics")
+                    if lyr and lyr.isValid():
+                        QgsProject.instance().addMapLayer(lyr)
+                    try:
+                        for ext in ['.shp', '.shx', '.dbf', '.prj', '.cpg']:
+                            p = out_shp.replace('.shp', ext)
+                            if os.path.exists(p): os.remove(p)
+                    except: pass
+                else:
+                    self._auto_add_vector(out_shp)
 
             elif title == "Points Kernel Graphs":
                 layer = refs["Input Points Layer (vector)"].currentLayer()
@@ -1892,8 +2474,30 @@ class SzEduDialog(QDialog, FORM_CLASS):
                 v, t, xy = alg.resampler(alg_params)
                 alg.save({ 'INPUT1': out1, 'INPUT2': v, 'INPUT3': xy })
                 alg.save({ 'INPUT1': out2, 'INPUT2': t, 'INPUT3': xy })
-                self._auto_add_vector(out1)
-                self._auto_add_vector(out2)
+                
+                if refs["Output Layer Sample"]["fw"].is_temp:
+                    lyr1 = load_as_memory_layer(out1, "sample", "Output Layer Sample")
+                    if lyr1 and lyr1.isValid():
+                        QgsProject.instance().addMapLayer(lyr1)
+                    try:
+                        for ext in ['.shp', '.shx', '.dbf', '.prj', '.cpg']:
+                            p = out1.replace('.shp', ext)
+                            if os.path.exists(p): os.remove(p)
+                    except: pass
+                else:
+                    self._auto_add_vector(out1)
+                    
+                if refs["Output Layer 1-Sample"]["fw"].is_temp:
+                    lyr2 = load_as_memory_layer(out2, "1_sample", "Output Layer 1-Sample")
+                    if lyr2 and lyr2.isValid():
+                        QgsProject.instance().addMapLayer(lyr2)
+                    try:
+                        for ext in ['.shp', '.shx', '.dbf', '.prj', '.cpg']:
+                            p = out2.replace('.shp', ext)
+                            if os.path.exists(p): os.remove(p)
+                    except: pass
+                else:
+                    self._auto_add_vector(out2)
 
             elif title == "Points To Grid":
                 v_layer = refs["Input Points Layer (vector)"].currentLayer()
@@ -2026,6 +2630,16 @@ class SzEduDialog(QDialog, FORM_CLASS):
                     'NUMBER': refs["Number of Classes"].value(),
                     'OUTPUT': out_folder
                 })
+                
+                is_folder_temp = refs["Output Folder"].is_temp
+                if is_folder_temp:
+                    import os
+                    csv_path = os.path.join(out_folder, "plotROC.csv")
+                    if os.path.exists(csv_path):
+                        csv_lyr = csv_to_memory_layer(csv_path, "Classify Vector by ROC (plotROC)")
+                        if csv_lyr and csv_lyr.isValid():
+                            QgsProject.instance().addMapLayer(csv_lyr)
+                            
                 self._set_finished()
                 QMessageBox.information(self, "Success", f"Classify Vector by ROC completed.\\nSaved to:\\n{out_folder}")
                 
@@ -2054,6 +2668,16 @@ class SzEduDialog(QDialog, FORM_CLASS):
                     'NUMBER': refs["Number of Classes"].value(),
                     'OUTPUT': out_folder
                 })
+                
+                is_folder_temp = refs["Output Folder"].is_temp
+                if is_folder_temp:
+                    import os
+                    csv_path = os.path.join(out_folder, "plotROCW.csv")
+                    if os.path.exists(csv_path):
+                        csv_lyr = csv_to_memory_layer(csv_path, "Classify Vector by Weighted ROC (plotROCW)")
+                        if csv_lyr and csv_lyr.isValid():
+                            QgsProject.instance().addMapLayer(csv_lyr)
+                            
                 self._set_finished()
                 QMessageBox.information(self, "Success", f"Classify Vector by Weighted ROC completed.\\nSaved to:\\n{out_folder}")
 
@@ -2077,7 +2701,12 @@ class SzEduDialog(QDialog, FORM_CLASS):
                     'OUT': out_folder
                 })
                 self._set_finished()
-                QMessageBox.information(self, "Success", f"ROC Generator completed.\\nSaved to:\\n{out_folder}")
+                QMessageBox.information(self, "Success", f"ROC Generator completed.\nSaved to:\n{out_folder}")
+                
+                is_folder_temp = refs["Output Folder"].is_temp
+                if is_folder_temp:
+                    dlg = ChartsDialog(out_folder, "ROC Generator", is_temp=True, parent=self)
+                    dlg.exec_()
 
             elif title == "Confusion Matrix (FP/TN Threshold)":
                 out_gpkg = self._get_out_path(refs["Output GeoPackage"], suffix=".gpkg", prefix="Conf_matrix_")
@@ -2102,15 +2731,23 @@ class SzEduDialog(QDialog, FORM_CLASS):
                     'OUT': out_gpkg
                 })
                 
-                # Auto-load the GeoPackage
-                if os.path.exists(out_gpkg):
-                    from qgis.core import QgsVectorLayer
-                    v_lyr = QgsVectorLayer(f"{out_gpkg}|layername=confusion_matrix", "Confusion Matrix Output", "ogr")
-                    if v_lyr.isValid():
-                        QgsProject.instance().addMapLayer(v_lyr)
+                is_gpkg_temp = refs["Output GeoPackage"]["fw"].is_temp
+                if is_gpkg_temp:
+                    if os.path.exists(out_gpkg):
+                        lyr = load_as_memory_layer(out_gpkg, "confusion_matrix", "Confusion Matrix Output")
+                        if lyr and lyr.isValid():
+                            QgsProject.instance().addMapLayer(lyr)
+                        try: os.remove(out_gpkg)
+                        except: pass
+                else:
+                    if os.path.exists(out_gpkg):
+                        from qgis.core import QgsVectorLayer
+                        v_lyr = QgsVectorLayer(f"{out_gpkg}|layername=confusion_matrix", "Confusion Matrix Output", "ogr")
+                        if v_lyr.isValid():
+                            QgsProject.instance().addMapLayer(v_lyr)
 
                 self._set_finished()
-                QMessageBox.information(self, "Success", f"Confusion Matrix calculated.\\nSaved to:\\n{out_gpkg}")
+                QMessageBox.information(self, "Success", f"Confusion Matrix calculated.\nSaved to:\n{out_gpkg}")
 
         except Exception as e:
             self.status_label.setText("Error during run")
@@ -2160,6 +2797,19 @@ class SzEduDialog(QDialog, FORM_CLASS):
             QMessageBox.warning(self, "Missing output", "Please select an output folder.")
             return
 
+        if algo_name == "Classify by ROC":
+            folder_widget = refs["Output Folder (Cutoffs & Raster)"]
+        elif algo_name == "ROC Generator":
+            folder_widget = refs["Output Folder"]
+        elif algo_name == "Confusion Matrix (FP/TN Threshold)":
+            folder_widget = refs["Output Folder (Metrics)"]
+        else:
+            folder_widget = refs["Output Folder (Cutoffs & Raster)"]
+        is_folder_temp = folder_widget.is_temp
+        if is_folder_temp:
+            QMessageBox.warning(self, "Missing output", "Please specify a directory path for the Output Folder.")
+            return
+
         self._set_running(f"Running {algo_name} ...")
 
         # Capture plain strings only – NO QGIS layer objects inside the thread closure.
@@ -2170,6 +2820,7 @@ class SzEduDialog(QDialog, FORM_CLASS):
         _cutoff      = cutoff
         _out_folder  = out_folder
         _algo_name   = algo_name
+        _is_folder_temp = is_folder_temp
 
         def _call_classify_raster():
             """
@@ -2278,13 +2929,22 @@ class SzEduDialog(QDialog, FORM_CLASS):
                         'out_tif':     out_tif,
                         'layer_name':  "Reclassified SI (ROC)",
                         'num_classes': _num_classes,
+                        'out_folder':  _out_folder,
+                        'is_temp':     _is_folder_temp,
+                        'algo_name':   _algo_name,
+                        'method_label': "ROC",
                     }
 
                 # ── ROC Generator (no raster output) ─────────────────────────────
                 elif _algo_name == "ROC Generator":
                     from ..scripts import sz_raster_utils
                     sz_raster_utils.save_roc_fit(y_true, y_scores, _out_folder, method_tag='ROC_Gen')
-                    return {'out_tif': None}
+                    return {
+                        'out_tif':     None,
+                        'out_folder':  _out_folder,
+                        'is_temp':     _is_folder_temp,
+                        'algo_name':   _algo_name,
+                    }
 
                 # ── Confusion Matrix (no raster output) ──────────────────────────
                 elif _algo_name == "Confusion Matrix (FP/TN Threshold)":
@@ -2310,7 +2970,12 @@ class SzEduDialog(QDialog, FORM_CLASS):
                         'False Negatives':    fn
                     }])
                     df.to_csv(os.path.join(_out_folder, "confusion_matrix_metrics.csv"), index=False)
-                    return {'out_tif': None}
+                    return {
+                        'out_tif':     None,
+                        'out_folder':  _out_folder,
+                        'is_temp':     _is_folder_temp,
+                        'algo_name':   _algo_name,
+                    }
 
                 # ── Closest Point / F1-Score / Threat Score (CSI) ────────────────
                 elif _algo_name in ("Classify by Closest Point (0,1)", "Classify by F1-Score", "Classify by Threat Score (CSI)"):
@@ -2379,6 +3044,10 @@ class SzEduDialog(QDialog, FORM_CLASS):
                         'out_tif':     out_tif,
                         'layer_name':  f"Reclassified SI ({method_label})",
                         'num_classes': _num_classes,
+                        'out_folder':  _out_folder,
+                        'is_temp':     _is_folder_temp,
+                        'algo_name':   _algo_name,
+                        'method_label': method_label,
                     }
 
             except Exception as e:
@@ -2418,6 +3087,42 @@ class SzEduDialog(QDialog, FORM_CLASS):
         if not isinstance(result, dict):
             return
 
+        is_temp = result.get('is_temp', False)
+        out_folder = result.get('out_folder')
+        algo_name = result.get('algo_name')
+        method_label = result.get('method_label')
+
+        # Load cutoffs/metrics CSV if temporary
+        if is_temp and out_folder:
+            import os
+            from qgis.core import QgsProject
+            if algo_name == "Classify by ROC":
+                csv_path = os.path.join(out_folder, "classification_cutoffs_ROC.csv")
+                csv_lyr = csv_to_memory_layer(csv_path, "Classify by ROC Cutoffs")
+                if csv_lyr and csv_lyr.isValid():
+                    QgsProject.instance().addMapLayer(csv_lyr)
+            elif algo_name == "ROC Generator":
+                csv_path = os.path.join(out_folder, "ROC_Gen_fit_ROC_data.csv")
+                csv_lyr = csv_to_memory_layer(csv_path, "ROC Generator Fit ROC Data")
+                if csv_lyr and csv_lyr.isValid():
+                    QgsProject.instance().addMapLayer(csv_lyr)
+            elif algo_name == "Confusion Matrix (FP/TN Threshold)":
+                csv_path = os.path.join(out_folder, "confusion_matrix_metrics.csv")
+                csv_lyr = csv_to_memory_layer(csv_path, "Confusion Matrix Metrics")
+                if csv_lyr and csv_lyr.isValid():
+                    QgsProject.instance().addMapLayer(csv_lyr)
+            elif method_label:
+                csv_path = os.path.join(out_folder, f"classification_cutoffs_{method_label}.csv")
+                csv_lyr = csv_to_memory_layer(csv_path, f"{algo_name} Cutoffs")
+                if csv_lyr and csv_lyr.isValid():
+                    QgsProject.instance().addMapLayer(csv_lyr)
+
+            # Show tabbed Charts Dialog if there are PNGs
+            import glob
+            if glob.glob(os.path.join(out_folder, "*.png")):
+                dlg = ChartsDialog(out_folder, algo_name or "Classify Raster", is_temp=True, parent=self)
+                dlg.exec_()
+
         out_tif = result.get('out_tif')
         if not out_tif:
             # Algorithms that produce no raster (ROC Generator, Confusion Matrix)
@@ -2430,8 +3135,14 @@ class SzEduDialog(QDialog, FORM_CLASS):
         from qgis.PyQt.QtGui import QColor
         import matplotlib.cm as cm
 
-        rlayer = QgsRasterLayer(out_tif, layer_name)
-        if not rlayer.isValid():
+        if is_temp:
+            rlayer = self.load_raster_as_memory_layer(out_tif, layer_name)
+            if rlayer == "CANCELLED":
+                return
+        else:
+            rlayer = QgsRasterLayer(out_tif, layer_name)
+
+        if not rlayer or not rlayer.isValid():
             QMessageBox.warning(self, "Layer error",
                                 f"The reclassified raster could not be loaded:\n{out_tif}")
             return
