@@ -1239,6 +1239,21 @@ class SzEduDialog(QDialog, FORM_CLASS):
         self.adjustSize()
         self._update_info()
 
+    def closeEvent(self, event):
+        # Defense-in-depth against the QGIS-shutdown access violation: when the
+        # dialog is torn down, mute every layer/field combo so that any layer
+        # removal happening during teardown can't fire a slot against a widget
+        # whose C++ side is already gone. (The slots are also guarded
+        # individually, since project clear during fileExit runs before this.)
+        try:
+            for cb in self.findChildren(QgsMapLayerComboBox):
+                cb.blockSignals(True)
+            for cb in self.findChildren(QgsFieldComboBox):
+                cb.blockSignals(True)
+        except Exception:
+            pass
+        super().closeEvent(event)
+
     def _update_info(self, *args):
         tab_idx = self.mainTabWidget.currentIndex()
         text_name = ""
@@ -1609,8 +1624,20 @@ class SzEduDialog(QDialog, FORM_CLASS):
         cb_corr_lyr = self._vl_combo()
         corr_list = QListWidget()
         def _pop_corr_fields(lyr):
+            from qgis.PyQt import sip
+            # During QGIS shutdown the project is cleared and every layer is
+            # removed, which makes the combo emit layerChanged while the C++
+            # widgets/layers are mid-teardown. Touching a deleted object here
+            # is an access violation (not a catchable Python exception), so bail
+            # out if anything we need has already been deleted.
+            if sip.isdeleted(corr_list):
+                return
             corr_list.clear()
-            if lyr and lyr.isValid():
+            try:
+                valid = lyr is not None and not sip.isdeleted(lyr) and lyr.isValid()
+            except (RuntimeError, AttributeError):
+                valid = False
+            if valid:
                 from qgis.PyQt.QtWidgets import QListWidgetItem
                 for f in lyr.fields():
                     item = QListWidgetItem(f.name())
