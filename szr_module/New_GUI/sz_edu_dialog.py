@@ -57,31 +57,31 @@ UI_FILE = os.path.join(os.path.dirname(__file__), 'SZ_edu.ui')
 FORM_CLASS, _ = uic.loadUiType(UI_FILE)
 
 INFO_DICT = {
-    'Weight of Evidence (WoE)': "<b>Weight of Evidence (WoE)</b><br><br><b>Description:</b><br>WoE is a data-driven, bivariate statistical method based on Bayes' rule. It calculates positive and negative weights (W+ and W-) for each predictive factor class based on the presence or absence of landslides.<br><br><b>Inputs Required:</b><br>- Dependent Variable (Landslide inventory).<br>- Independent Variables (Covariates) MUST be classified/categorical.",
-    'Frequency Ratio (FR)': "<b>Frequency Ratio (FR)</b><br><br><b>Description:</b><br>FR is a bivariate statistical method that calculates a ratio between the percentage of landslides occurring in a given parameter class and the percent area of that class in the study region.<br><br><b>Inputs Required:</b><br>- Dependent Variable (Landslide inventory).<br>- Independent Variables (Covariates) MUST be classified/categorical.",
-    'Logistic Regression (LR)': "<b>Logistic Regression (LR)</b><br><br><b>Description:</b><br>LR is a multivariate statistical method that models the probability of landslide occurrence as a logistic function of multiple independent variables. It handles both continuous and categorical variables naturally.<br><br><b>Inputs Required:</b><br>- Dependent Variable (Landslide inventory).<br>- Independent Variables (Covariates) can be both continuous and categorical.",
-    'Random Forest (RF)': "<b>Random Forest (RF)</b><br><br><b>Description:</b><br>RF is an ensemble machine learning method that operates by constructing a multitude of decision trees at training time and outputting the class that is the mode of the classes or mean prediction.<br><br><b>Inputs Required:</b><br>- Dependent Variable (Landslide inventory).<br>- Independent Variables (Covariates) can be both continuous and categorical.",
-    'Support Vector Machine (SVM)': "<b>Support Vector Machine (SVM)</b><br><br><b>Description:</b><br>SVM is a powerful supervised learning model that analyzes data and recognizes patterns. It constructs a hyperplane or set of hyperplanes in a high-dimensional space for classification.<br><br><b>Inputs Required:</b><br>- Dependent Variable (Landslide inventory).<br>- Independent Variables (Covariates) can be both continuous and categorical (requires normalization, handled internally).",
-    'Decision Trees (DT)': "<b>Decision Trees (DT)</b><br><br><b>Description:</b><br>DT uses a tree-like model of decisions and their possible consequences. It breaks down a dataset into smaller subsets while at the same time an associated decision tree is incrementally developed.<br><br><b>Inputs Required:</b><br>- Dependent Variable (Landslide inventory).<br>- Independent Variables (Covariates) can be both continuous and categorical.",
+    'Weight of Evidence (WoE)': "<b>Weight of Evidence (WoE)</b><br><br><b>Description:</b><br>WoE is a data-driven, bivariate statistical method based on Bayes' rule. For each class of a predictive factor it computes a positive weight (W+) and a negative weight (W-) from the presence or absence of landslides: the higher the contrast, the stronger that class's association with instability.<br><br><b>Inputs Required:</b><br>- Dependent Variable (Landslide inventory).<br>- Independent Variables (Covariates) MUST be classified/categorical.",
+    'Frequency Ratio (FR)': "<b>Frequency Ratio (FR)</b><br><br><b>Description:</b><br>FR is a bivariate statistical method that compares the percentage of landslides falling in a parameter class with the percentage of the study area occupied by that class. FR &gt; 1 means the class is more prone to landslides than average; FR &lt; 1 means less prone.<br><br><b>Inputs Required:</b><br>- Dependent Variable (Landslide inventory).<br>- Independent Variables (Covariates) MUST be classified/categorical.",
+    'Logistic Regression (LR)': "<b>Logistic Regression (LR)</b><br><br><b>Description:</b><br>LR is a multivariate statistical method that models the probability of landslide occurrence (a value between 0 and 1) as a function of several predictive variables combined. Its coefficients show how much, and in which direction, each variable contributes to susceptibility.<br><br><b>Inputs Required:</b><br>- Dependent Variable (Landslide inventory).<br>- Independent Variables (Covariates) can be both continuous and categorical.",
+    'Random Forest (RF)': "<b>Random Forest (RF)</b><br><br><b>Description:</b><br>RF is an ensemble machine learning method that builds many decision trees, each trained on a random subset of the data and variables, and averages their predictions. Combining many trees reduces the overfitting typical of a single tree and usually gives robust, accurate results.<br><br><b>Inputs Required:</b><br>- Dependent Variable (Landslide inventory).<br>- Independent Variables (Covariates) can be both continuous and categorical.",
+    'Support Vector Machine (SVM)': "<b>Support Vector Machine (SVM)</b><br><br><b>Description:</b><br>SVM is a supervised machine learning method that finds the boundary separating landslide from non-landslide conditions with the widest possible margin. Kernel functions allow this boundary to be non-linear, capturing complex relationships between covariates.<br><br><b>Inputs Required:</b><br>- Dependent Variable (Landslide inventory).<br>- Independent Variables (Covariates) can be both continuous and categorical (requires normalization, handled internally).",
+    'Decision Trees (DT)': "<b>Decision Trees (DT)</b><br><br><b>Description:</b><br>DT splits the dataset step by step using simple threshold rules on the predictive variables (e.g., slope &gt; 25&deg;), forming a tree of decisions that leads to a susceptibility class. It is very easy to interpret, but a single tree tends to overfit the training data.<br><br><b>Inputs Required:</b><br>- Dependent Variable (Landslide inventory).<br>- Independent Variables (Covariates) can be both continuous and categorical.",
     
-    'Binomial Mode Extra': "<br><br><b>Mode: SI Binomial Sampler</b><br>The binomial sampler divides the data into training and testing datasets based on a specified percentage (e.g., 70% train, 30% test). It calibrates the model on the train set and evaluates it on the test set.<br><br><b>Outputs:</b><br>- Output Test/Train Raster: Pixel values will be 0 for Training data, 1 for Testing data, and NoData otherwise (for Raster Base).<br>- Additional Output Folder contains: ROC (Receiver Operating Characteristic) and SR (Success Rate) curves (.png), ROC and SR data (.csv), and model-specific files (weights, coefficients, or feature importance). The ROC plot includes validation metrics: AUC (Area Under the Curve), DIS (Distance to the perfect (0,1) classifier), and CSI (Critical Success Index / Threat Score).",
-    'KFold Mode Extra': "<br><br><b>Mode: SI K-fold</b><br>K-fold cross-validation divides the data randomly into K equal-sized folds. The model is trained K times, each time using K-1 folds for training and evaluating on the remaining 1 fold. This reduces bias in performance estimation.<br><br><b>Outputs:</b><br>- Output Test/Train Raster: Pixel values range from 1 to K representing the assigned fold for each pixel, and NoData otherwise (for Raster Base).<br>- Additional Output Folder contains K subfolders (e.g., fold_0, fold_1), each containing its respective ROC (Receiver Operating Characteristic) and SR (Success Rate) curves (.png) showing AUC (Area Under the Curve), DIS (Distance to the perfect (0,1) classifier), and CSI (Critical Success Index / Threat Score) metrics, along with ROC and SR data (.csv), and model-specific files.",
+    'Binomial Mode Extra': "<br><br><b>Mode: SI Binomial Sampler</b><br>The binomial sampler randomly splits the data into a training and a testing set according to a chosen percentage (e.g., 70% train / 30% test). The model is calibrated on the training set and validated on the testing set, so its performance is measured on data it has never seen.<br><br><b>Outputs:</b><br>- Output Test/Train Raster (aligned to the Raster Base): pixels used for training = 0, for testing = 1, all others NoData.<br>- Additional Output Folder contains: ROC (Receiver Operating Characteristic) and SR (Success Rate) curves (.png), ROC and SR data (.csv), and model-specific files (weights, coefficients, or feature importance). The ROC plot includes validation metrics: AUC (Area Under the Curve), DIS (Distance to the perfect (0,1) classifier), and CSI (Critical Success Index / Threat Score).",
+    'KFold Mode Extra': "<br><br><b>Mode: SI K-fold</b><br>K-fold cross-validation randomly divides the data into K equal folds. The model is trained K times, each time leaving one fold out for testing and training on the other K-1, so every observation is used for validation exactly once. This gives a more robust performance estimate than a single train/test split.<br><br><b>Outputs:</b><br>- Output Test/Train Raster: Pixel values range from 1 to K representing the assigned fold for each pixel, and NoData otherwise (for Raster Base).<br>- Additional Output Folder contains K subfolders (e.g., fold_0, fold_1), each containing its respective ROC (Receiver Operating Characteristic) and SR (Success Rate) curves (.png) showing AUC (Area Under the Curve), DIS (Distance to the perfect (0,1) classifier), and CSI (Critical Success Index / Threat Score) metrics, along with ROC and SR data (.csv), and model-specific files.",
     
-    'Clean Points By Raster Kernel': "<b>Clean Points By Raster Kernel</b><br><br>Filter and clean vector points using a raster constraint. Only points whose surrounding kernel (buffer) contains acceptable valid raster values will be retained.",
+    'Clean Points By Raster Kernel': "<b>Clean Points By Raster Kernel</b><br><br>Filters an input point layer using a raster constraint: a point is kept only if the raster cells within a kernel (buffer) around it contain accepted, valid values.",
     'Attribute Table Statistics': "<b>Attribute Table Statistics</b><br><br>Calculate descriptive statistics based on an attribute table of a vector layer.",
-    'Points Kernel Statistics': "<b>Points Kernel Statistics</b><br><br>Performs a statistical extraction around points acting as kernels against a raster grid, constrained by a mask polygon.",
+    'Points Kernel Statistics': "<b>Points Kernel Statistics</b><br><br>Extracts statistics of the raster values found within a kernel (neighbourhood) around each input point, limited to a mask polygon.",
     'Points Kernel Graphs': "<b>Points Kernel Graphs</b><br><br>Generates informative graphs and plots based on the kernel statistics calculated around the input points.",
-    'Points Sampler': "<b>Points Sampler</b><br><br>Divides an input point layer into two distinct samples (for example, training and testing subsets) based on a specified percentage, applying a grid-based spatial sampling mechanism.",
+    'Points Sampler': "<b>Points Sampler</b><br><br>Splits an input point layer into two subsets (e.g., training and testing) according to a chosen percentage, using a spatial grid so the sampling stays spatially balanced.",
     'Points To Grid': "<b>Points To Grid</b><br><br>Rasterizes an input point dataset onto a grid, snapping to a reference raster and specified spatial extent.",
     'Poly To Grid': "<b>Poly To Grid</b><br><br>Rasterizes an input polygon dataset into a raster grid with a user-defined pixel width and height.",
     'Classify Field by .txt File': "<b>Classify Field by .txt File</b><br><br>Classifies (reclassifies) a continuous or categorical vector field using a set of rules defined in a plain text file.",
-    'Classify Field in Quantiles': "<b>Classify Field in Quantiles</b><br><br>Classifies a continuous vector field into equal-sized quantiles (e.g., quartiles, deciles) and creates a new field with the corresponding classification IDs.",
+    'Classify Field in Quantiles': "<b>Classify Field in Quantiles</b><br><br>Classifies a continuous vector field into quantiles (e.g., quartiles, deciles) &mdash; classes containing an equal number of features &mdash; and writes the class IDs to a new field.",
     'Correlation Plot': "<b>Correlation Plot</b><br><br>Generates a correlation matrix plot for a set of continuous independent variables, useful for identifying highly correlated features before running susceptibility models.",
     
-    'Classify Vector by ROC': "<b>Classify Vector by ROC</b><br><br>Reclassifies the continuous Susceptibility Index (SI) into discrete classes based on points of the ROC curve, maximizing standard metrics.",
-    'Classify Vector by Weighted ROC': "<b>Classify Vector by Weighted ROC</b><br><br>Reclassifies the SI into discrete classes using a weighted ROC approach, incorporating a custom weight field.",
+    'Classify Vector by ROC': "<b>Classify Vector by ROC</b><br><br>Reclassifies the continuous Susceptibility Index (SI) into discrete classes by selecting cutoff values along the ROC curve that maximize the discrimination between stable and unstable areas.",
+    'Classify Vector by Weighted ROC': "<b>Classify Vector by Weighted ROC</b><br><br>Same as Classify by ROC, but each observation contributes to the ROC curve according to a user-defined weight field, giving more influence to selected events or areas.",
     'ROC Generator': "<b>ROC Generator</b><br><br>Calculates and outputs a standalone Receiver Operating Characteristic (ROC) curve plot and Area Under the Curve (AUC) for an existing SI prediction field against a dependent variable. The generated plot includes threshold metrics: DIS (Distance to the perfect (0,1) classifier) and CSI (Critical Success Index / Threat Score).",
-    'Confusion Matrix (FP/TN Threshold)': "<b>Confusion Matrix (FP/TN Threshold)</b><br><br>Calculates true positives, false positives, true negatives, and false negatives metrics based on a specified cutoff percentile to generate a confusion matrix package.",
+    'Confusion Matrix (FP/TN Threshold)': "<b>Confusion Matrix (FP/TN Threshold)</b><br><br>Applies a cutoff percentile to the SI and counts True Positives, False Positives, True Negatives and False Negatives, producing the confusion matrix and derived metrics.",
     # Raster Classify SI tools
     # Raster Classify SI tools
     'Classify by ROC': (
@@ -91,7 +91,7 @@ INFO_DICT = {
         '<b>Formula:</b><br>'
         'Youden Index J = TPR &minus; FPR<br><br>'
         '<b>Reclassification:</b><br>'
-        'Uses an optimized Genetic Algorithm to find the N&minus;1 breakpoints that maximize the difference between True Positives and False Positives globally along the ROC curve.<br><br>'
+        'Uses an optimized Genetic Algorithm to find the N&minus;1 breakpoints that maximize the difference between the True Positive Rate and the False Positive Rate globally along the ROC curve.<br><br>'
         '<b>Focus:</b><br>'
         'Global discrimination and multi-class optimization.<br><br>'
         '<b>Best for:</b><br>'
@@ -114,7 +114,7 @@ INFO_DICT = {
         '<b>Focus:</b><br>'
         'Balanced geometric trade-off in the ROC space.<br><br>'
         '<b>Best for:</b><br>'
-        'When you want a mathematically neutral boundary between Low and High risk zones, defined spatially rather than vertically.<br><br>'
+        'When you want a mathematically neutral boundary between low and high susceptibility, based on the straight-line distance in ROC space rather than the vertical distance from the diagonal.<br><br>'
         '<b>Output:</b><br>'
         '- A CSV file with the calculated cutoff values.<br>'
         '- A reclassified GeoTIFF raster (N classes, RdYlGn color ramp) added to QGIS.'
@@ -122,7 +122,7 @@ INFO_DICT = {
     'Classify by F1-Score': (
         '<b>Classify by F1-Score</b><br><br>'
         '<b>Description:</b><br>'
-        'Balance Precision (how many predicted "High Risk" were actually landslides) and Recall (how many total landslides were caught) to find the most representative class boundary.<br><br>'
+        'Balances precision (how many pixels predicted as "high susceptibility" were actually landslides) and recall (how many total landslides were caught) to find the most representative class boundary.<br><br>'
         '<b>Formula:</b><br>'
         'F1 = 2&times;TP / (2&times;TP + FP + FN)<br><br>'
         '<b>Reclassification:</b><br>'
@@ -130,7 +130,7 @@ INFO_DICT = {
         '<b>Focus:</b><br>'
         'Reliable prediction quality and classification accuracy.<br><br>'
         '<b>Best for:</b><br>'
-        'Imbalanced datasets (e.g., landslides covering &lt; 5% of the area) as it ensures the high-risk class is trustworthy and not overpredicted.<br><br>'
+        'Imbalanced datasets (e.g., landslides covering &lt; 5% of the area) as it ensures the high-susceptibility class is trustworthy and not overpredicted.<br><br>'
         '<b>Output:</b><br>'
         '- A CSV file with the calculated cutoff values.<br>'
         '- A reclassified GeoTIFF raster (N classes, RdYlGn color ramp) added to QGIS.'
@@ -146,7 +146,7 @@ INFO_DICT = {
         '<b>Focus:</b><br>'
         'Hazard detection performance, ignoring stable zones.<br><br>'
         '<b>Best for:</b><br>'
-        'When "Low Risk" areas are secondary and the primary goal is maximizing the detection of future landslide events.<br><br>'
+        'When "low susceptibility" areas are secondary and the primary goal is maximizing the detection of future landslide events.<br><br>'
         '<b>Output:</b><br>'
         '- A CSV file with the calculated cutoff values.<br>'
         '- A reclassified GeoTIFF raster (N classes, RdYlGn color ramp) added to QGIS.'
