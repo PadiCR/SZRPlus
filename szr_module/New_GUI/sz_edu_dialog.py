@@ -1220,7 +1220,19 @@ class SzEduDialog(QDialog, FORM_CLASS):
         self.info_text = QTextEdit()
         self.info_text.setReadOnly(True)
         self.info_text.setMinimumWidth(300)
-        self.info_text.setStyleSheet("background-color: #f7f9fc; color: #2c3e50; font-size: 13px; font-family: 'Segoe UI'; padding: 10px; border: 1px solid #ccc; border-radius: 4px;")
+        self.info_text.setStyleSheet(
+            "QTextEdit { background-color: #f7f9fc; color: #2c3e50; font-size: 13px; font-family: 'Segoe UI'; padding: 10px; border: 1px solid #ccc; border-radius: 4px; }"
+            "QScrollBar:vertical { background: #e8ecf1; width: 12px; margin: 0px; border-radius: 6px; }"
+            "QScrollBar::handle:vertical { background: #a8b2bd; min-height: 30px; border-radius: 6px; }"
+            "QScrollBar::handle:vertical:hover { background: #7f8b98; }"
+            "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }"
+            "QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: none; }"
+            "QScrollBar:horizontal { background: #e8ecf1; height: 12px; margin: 0px; border-radius: 6px; }"
+            "QScrollBar::handle:horizontal { background: #a8b2bd; min-width: 30px; border-radius: 6px; }"
+            "QScrollBar::handle:horizontal:hover { background: #7f8b98; }"
+            "QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0px; }"
+            "QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background: none; }"
+        )
         
         splitter = QSplitter(Qt.Horizontal)
         splitter.addWidget(self.mainTabWidget)
