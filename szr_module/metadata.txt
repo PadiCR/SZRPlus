@@ -6,7 +6,7 @@
 name=SZR+
 qgisMinimumVersion=3.28
 description=SZR+ (Susceptibility Zoning + Raster capabilities)
-version=1.8
+version=1.9
 author=Cristobal Padilla
 email=cristobalpadilla@gmail.com
 
@@ -19,8 +19,7 @@ repository=https://github.com/PadiCR/SZRPlus
 # Recommended items:
 
 hasProcessingProvider=yes
-# Uncomment the following line and add your changelog:
-# changelog=
+changelog=1.9 - Minor information panel text edits and clarifications.
 
 # Tags are comma separated with spaces allowed
 tags=susceptibility, cross-validation, pre-processing, statistical methods, hazard

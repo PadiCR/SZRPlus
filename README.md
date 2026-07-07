@@ -2,6 +2,7 @@
 
 [![QGIS](https://img.shields.io/badge/QGIS-3.28+-blue.svg)](https://www.qgis.org)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
+[![Version](https://img.shields.io/badge/Version-1.9-green.svg)](https://github.com/PadiCR/SZRPlus)
 
 ## Introduction
 
@@ -12,24 +13,23 @@
 
 While primarily developed for landslide susceptibility, SZR+ is a versatile tool applicable to various natural hazards and inter-disciplinary spatial modeling tasks.
 
+SZR+ is designed with a **didactic approach**: a clear, guided interface with lateral information panels that explain each susceptibility model and tool — its purpose, required inputs, and when to use it — making susceptibility modeling approachable for students and newcomers, not only expert users.
+
 ### Key Features
-*   **Modern GUI**: A redesigned, user-friendly interface based on QGIS processing standards.
+*   **Modern, Didactic GUI**: A redesigned, user-friendly interface based on QGIS processing standards, with lateral **information panels** that explain each model and tool — its purpose, required inputs, and when to use it — as you work.
+*   **Susceptibility Models** (available in **both** Vector and Raster modes):
+    *   Weight of Evidence (WoE)
+    *   Frequency Ratio (FR)
+    *   Logistic Regression (LR)
+    *   Decision Tree (DT)
+    *   Support Vector Machine (SVM)
+    *   Random Forest (RF)
 *   **Vector Base Mode**: Retains all the original vector-based analysis functions from the SZ-plugin version 1.1.5, fully integrated into the redesigned UI.
-*   **Raster Base Mode**:
+*   **Raster Base Mode** *(new in SZR+)*:
     *   **Native Raster Support**: Direct processing of raster datasets for faster and more scalable analysis.
         *   **Requirement**: All input rasters must be aligned and have the exact same spatial resolution.
         *   **Requirement (Landslide Inventory)**: The landslide inventory must be a binary raster (1 for landslide occurrence, 0 for no landslide).
-    *   **Statistical Models**:
-        *   Weight of Evidence (WoE)
-        *   Frequency Ratio (FR)
-        *   Logistic Regression (LR)
-        *   Decision Tree (DT)
-        *   Support Vector Machine (SVM)
-        *   Random Forest (RF)
-    *   **Validation**:
-        *   Random Test/Train split.
-        *   K-Fold Cross-Validation.
-        *   ROC Curve and AUC generation.
+    *   **Validation**: Random Test/Train split, K-Fold Cross-Validation, and ROC Curve / AUC generation.
     *   **Classification**: Advanced SI classification methods (ROC maximization, F1-Score, Threat Score).
 
 ## Installation
@@ -38,7 +38,7 @@ SZR+ can be installed manually into QGIS.
 
 ### Minimum Requirements
 *   **QGIS**: 3.28+
-*   **Dependencies**: `scikit-learn`, `libpysal` (Usually handled by the built-in installer).
+*   **Dependencies**: `scikit-learn`, `libpysal`, `seaborn`, `geopandas` (Usually handled by the built-in installer).
 
 ### Install from ZIP (Recommended)
 1. Download the pre-packaged [**`szr_module.zip`**](szr_module.zip) directly from the root of this repository.
