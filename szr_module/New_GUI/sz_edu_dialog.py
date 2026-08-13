@@ -286,6 +286,62 @@ def _colormap(name):
         return cm.get_cmap(name)
 
 
+def _finish_raster_style(layer, heading):
+    """Anchor a freshly styled raster's symbology, once it is in the project.
+
+    Call this *after* addMapLayer: both steps need the layer's tree node.
+
+    Two things outlive the session here. The style is written as the raster's
+    default .qml, so it comes back whenever the file is loaded on its own —
+    after a broken temporary source is repaired, when the layer is re-added, or
+    when the raster is opened in another project — none of which read the style
+    the current project holds. And the legend heading is relabelled: QGIS heads
+    a raster's legend with the band's display name, which GDAL assembles from
+    the band's colour interpretation. For a single-band GeoTIFF that is always
+    'Gray', whatever renderer is in use, so the panel ends up announcing 'Band 1
+    (Gray)' above a colour ramp. The replacement lives on the layer-tree node
+    and is written into the project file, so it survives reopening.
+    """
+    _save_default_style(layer)
+    _set_legend_heading(layer, heading)
+
+
+def _save_default_style(layer):
+    """Write the layer's style as the raster's default .qml sidecar."""
+    try:
+        provider = layer.dataProvider()
+        if provider is None or provider.name() != 'gdal':
+            return                      # only file-backed rasters get a sidecar
+        path = layer.source().split('|')[0]
+        if not os.path.isfile(path):
+            return                      # in-memory or already-gone source
+        try:
+            from qgis.core import QgsMapLayer
+            layer.saveDefaultStyle(QgsMapLayer.AllStyleCategories)
+        except TypeError:
+            layer.saveDefaultStyle()    # QGIS < 3.26 has no categories overload
+    except Exception as e:
+        QgsMessageLog.logMessage(f"Could not save the raster's default style: {e}",
+                                 LOG_TAG, Qgis.Warning)
+
+
+def _set_legend_heading(layer, text):
+    """Replace the band's display name at the head of the layer's legend."""
+    try:
+        from qgis.core import QgsMapLayerLegendUtils
+        from qgis.utils import iface
+
+        node = QgsProject.instance().layerTreeRoot().findLayer(layer.id())
+        if node is None:
+            return
+        QgsMapLayerLegendUtils.setLegendNodeUserLabel(node, 0, text)
+        if iface is not None:
+            iface.layerTreeView().layerTreeModel().refreshLayerLegend(node)
+    except Exception as e:
+        QgsMessageLog.logMessage(f"Could not relabel the raster legend: {e}",
+                                 LOG_TAG, Qgis.Warning)
+
+
 def _style_si_raster(r_lyr):
     """Render an SI raster with an interpolated RdYlGn_r ramp over its value range."""
     try:
@@ -1202,7 +1258,7 @@ def _simple_page(title: str, params: list, run_label: str, btn_color: str = "#8e
 # ─────────────────────────────────────────────────────────────────────────────
 
 class SzEduPanel(QWidget, FORM_CLASS):
-    """The SZR+ panel. Hosted inside a QgsDockWidget by the plugin entry point."""
+    """The SZR+ panel. Hosted inside a QDialog by the plugin entry point."""
 
     ALGO_KEYS_R = ['woe', 'fr', 'lr', 'rf', 'svm', 'dt']
     ALGO_NAMES  = [
@@ -1258,9 +1314,10 @@ class SzEduPanel(QWidget, FORM_CLASS):
         self.classify_list.setCurrentRow(-1)
         self.classify_list_r.setCurrentRow(-1)
 
-        # A docked panel gets no closeEvent when QGIS exits, so the teardown
-        # guard is hooked to the application shutdown instead. PyQt drops the
-        # connection automatically if this panel is destroyed first.
+        # As a child widget rather than a window of its own, the panel gets no
+        # closeEvent when QGIS exits, so the teardown guard is hooked to the
+        # application shutdown instead. PyQt drops the connection automatically
+        # if this panel is destroyed first.
         app = QgsApplication.instance()
         if app is not None:
             app.aboutToQuit.connect(self._mute_layer_widgets)
@@ -1475,7 +1532,7 @@ class SzEduPanel(QWidget, FORM_CLASS):
         Mutes every layer/field combo so that the layer removal happening during
         teardown can't fire a slot against a widget whose C++ side is already
         gone. (The slots are also guarded individually, since the project clear
-        during fileExit runs before this.) As a docked panel never receives
+        during fileExit runs before this.) As a child widget never receives
         closeEvent on shutdown, this is also wired to the application's
         aboutToQuit signal.
         """
@@ -2238,6 +2295,7 @@ class SzEduPanel(QWidget, FORM_CLASS):
                 if lyr and lyr.isValid():
                     _style_si_raster(lyr)
                     QgsProject.instance().addMapLayer(lyr)
+                    _finish_raster_style(lyr, "Susceptibility Index")
 
             is_folder_temp = m_refs['folder'].is_temp
 
@@ -3407,5 +3465,6 @@ class SzEduPanel(QWidget, FORM_CLASS):
         renderer = QgsPalettedRasterRenderer(rlayer.dataProvider(), 1, classes)
         rlayer.setRenderer(renderer)
         QgsProject.instance().addMapLayer(rlayer)
+        _finish_raster_style(rlayer, "Susceptibility Class")
         rlayer.triggerRepaint()
 

@@ -56,7 +56,7 @@ class classePlugin(object):
 
     def __init__(self):
         self.provider = None
-        self.dock = None
+        self.dialog = None
         dir=(os.path.dirname(os.path.abspath(__file__)))
         with open(dir+'/metadata.txt','r') as file:
             for line in file:
@@ -112,27 +112,41 @@ class classePlugin(object):
     DEFAULT_PANEL_SIZE = (1150, 720)
 
     def _open_panel(self):
-        """Show the SZR+ panel, creating it on first use."""
-        if self.dock is None:
+        """Show the SZR+ window, creating it on first use."""
+        if self.dialog is None:
             # Imported here so Qt widgets are only built once QGIS is ready.
-            from qgis.gui import QgsDockWidget
+            from qgis.PyQt.QtWidgets import QDialog, QVBoxLayout
             from .New_GUI.sz_edu_dialog import SzEduPanel
 
-            self.dock = QgsDockWidget(
-                'SZR+ (Susceptibility Zoning + Raster capabilities)',
-                iface.mainWindow())
-            self.dock.setObjectName('SZRPlusPanel')
-            self.dock.setWidget(SzEduPanel(self.dock))
-            iface.addDockWidget(Qt.RightDockWidgetArea, self.dock)
-            self.dock.closed.connect(self._save_panel_state)
+            # A child dialog of the main window is what earns the native frame
+            # and the QGIS icon beside the title. A dock widget can show
+            # neither: while floating it is a Qt::Tool window, and Windows
+            # draws no caption icon on a tool window however the icon is set.
+            self.dialog = QDialog(iface.mainWindow())
+            self.dialog.setObjectName('SZRPlusPanel')
+            self.dialog.setWindowTitle(
+                'SZR+ (Susceptibility Zoning + Raster capabilities)')
+            # Plain dialogs get only a close button; the panel is large enough
+            # to be worth minimising and maximising.
+            self.dialog.setWindowFlags(
+                Qt.Dialog | Qt.WindowSystemMenuHint
+                | Qt.WindowMinimizeButtonHint | Qt.WindowMaximizeButtonHint
+                | Qt.WindowCloseButtonHint)
+
+            layout = QVBoxLayout(self.dialog)
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.addWidget(SzEduPanel(self.dialog))
+
+            self.dialog.finished.connect(self._save_panel_state)
             self._restore_panel_state()
 
-        self.dock.setUserVisible(True)
-        # Re-check after showing: a floating dock can be repositioned by the
-        # window manager as it is mapped, and the monitor layout may have
-        # changed since the position was saved.
-        if self.dock.isFloating():
-            self._move_onto_screen()
+        self.dialog.show()
+        self.dialog.raise_()
+        self.dialog.activateWindow()
+        # Re-check after showing: the window manager can reposition a window as
+        # it is mapped, and the monitor layout may have changed since the
+        # position was saved.
+        self._move_onto_screen()
 
     def _screen_for_main_window(self):
         """The screen QGIS is currently on (not necessarily the primary one)."""
@@ -148,61 +162,56 @@ class classePlugin(object):
         return QApplication.primaryScreen()
 
     def _move_onto_screen(self):
-        """Keep the floating panel fully inside a visible screen.
+        """Keep the window fully inside a visible screen.
 
-        A floating QDockWidget is a top-level window with no automatic placement,
-        so without this it can open beyond the edge of a secondary monitor (or on
-        a monitor that is no longer attached).
+        The window carries its own placement, so without this it can open beyond
+        the edge of a secondary monitor (or on a monitor that is no longer
+        attached).
 
         Note resize() sets the *inner* size while move() positions the *frame*,
         so the window-manager decorations have to be budgeted separately —
         feeding frame dimensions into resize() makes the window grow each call.
         """
-        if self.dock is None or not self.dock.isFloating():
+        if self.dialog is None or self.dialog.isMaximized():
             return
 
         avail = self._screen_for_main_window().availableGeometry()
-        frame = self.dock.frameGeometry()
-        inner = self.dock.geometry()
+        frame = self.dialog.frameGeometry()
+        inner = self.dialog.geometry()
         dw = max(0, frame.width() - inner.width())
         dh = max(0, frame.height() - inner.height())
 
         new_w = min(inner.width(), max(200, avail.width() - dw))
         new_h = min(inner.height(), max(200, avail.height() - dh))
         if (new_w, new_h) != (inner.width(), inner.height()):
-            self.dock.resize(new_w, new_h)
+            self.dialog.resize(new_w, new_h)
 
-        frame = self.dock.frameGeometry()      # re-read after any resize
+        frame = self.dialog.frameGeometry()    # re-read after any resize
         x = min(max(frame.x(), avail.x()), avail.x() + avail.width() - frame.width())
         y = min(max(frame.y(), avail.y()), avail.y() + avail.height() - frame.height())
         if (x, y) != (frame.x(), frame.y()):
-            self.dock.move(x, y)
+            self.dialog.move(x, y)
 
     def _centre_panel(self):
-        """Centre the floating panel on the QGIS main window."""
+        """Centre the window on the QGIS main window."""
         main = iface.mainWindow()
         avail = self._screen_for_main_window().availableGeometry()
 
-        self.dock.resize(min(self.DEFAULT_PANEL_SIZE[0], avail.width() - 120),
-                         min(self.DEFAULT_PANEL_SIZE[1], avail.height() - 120))
+        self.dialog.resize(min(self.DEFAULT_PANEL_SIZE[0], avail.width() - 120),
+                           min(self.DEFAULT_PANEL_SIZE[1], avail.height() - 120))
 
-        frame = self.dock.frameGeometry()
+        frame = self.dialog.frameGeometry()
         ref = main.frameGeometry() if main is not None else avail
-        self.dock.move(ref.x() + (ref.width() - frame.width()) // 2,
-                       ref.y() + (ref.height() - frame.height()) // 2)
+        self.dialog.move(ref.x() + (ref.width() - frame.width()) // 2,
+                         ref.y() + (ref.height() - frame.height()) // 2)
         self._move_onto_screen()
 
     def _restore_panel_state(self):
-        """Reopen the panel where the user last left it, when that is still valid."""
+        """Reopen the window where the user last left it, when that is still valid."""
         from qgis.PyQt.QtCore import QRect
         from qgis.PyQt.QtWidgets import QApplication
 
-        floating = self.plugin_settings.value("panel/floating", True, type=bool)
         geom = self.plugin_settings.value("panel/geometry")
-
-        self.dock.setFloating(floating)
-        if not floating:
-            return                      # docked: Qt handles the layout
 
         rect = None
         try:
@@ -214,32 +223,32 @@ class classePlugin(object):
             rect = None
 
         # Only reuse a saved position if a screen still covers it — otherwise the
-        # panel would reopen on a monitor that is no longer there.
+        # window would reopen on a monitor that is no longer there.
         if rect is not None and any(s.availableGeometry().intersects(rect)
                                     for s in QApplication.screens()):
             # rect holds the frame position and the inner size (see _save_panel_state)
-            self.dock.resize(rect.width(), rect.height())
-            self.dock.move(rect.x(), rect.y())
+            self.dialog.resize(rect.width(), rect.height())
+            self.dialog.move(rect.x(), rect.y())
             self._move_onto_screen()
         else:
             self._centre_panel()
 
     def _save_panel_state(self):
-        """Remember the panel's placement for the next session."""
-        if self.dock is None:
+        """Remember the window's placement for the next session."""
+        if self.dialog is None:
             return
         try:
-            self.plugin_settings.setValue("panel/floating", self.dock.isFloating())
-            if self.dock.isFloating():
-                # Frame position (what move() takes) with the inner size (what
-                # resize() takes), so the pair round-trips through restore.
-                pos = self.dock.frameGeometry()
-                size = self.dock.geometry()
-                self.plugin_settings.setValue(
-                    "panel/geometry",
-                    [pos.x(), pos.y(), size.width(), size.height()])
+            if self.dialog.isMaximized() or self.dialog.isMinimized():
+                return          # keep the last ordinary placement instead
+            # Frame position (what move() takes) with the inner size (what
+            # resize() takes), so the pair round-trips through restore.
+            pos = self.dialog.frameGeometry()
+            size = self.dialog.geometry()
+            self.plugin_settings.setValue(
+                "panel/geometry",
+                [pos.x(), pos.y(), size.width(), size.height()])
         except RuntimeError:
-            pass                        # dock already destroyed on the C++ side
+            pass                        # dialog already destroyed on the C++ side
 
     def unload(self):
         if self.provider is not None:
@@ -248,8 +257,8 @@ class classePlugin(object):
         if hasattr(self, 'edu_action'):
             iface.removePluginMenu('SZR+', self.edu_action)
             iface.removeToolBarIcon(self.edu_action)
-        if self.dock is not None:
+        if self.dialog is not None:
             self._save_panel_state()
-            iface.removeDockWidget(self.dock)
-            self.dock.deleteLater()   # also deletes the panel it owns
-            self.dock = None
+            self.dialog.close()
+            self.dialog.deleteLater()   # also deletes the panel it owns
+            self.dialog = None
