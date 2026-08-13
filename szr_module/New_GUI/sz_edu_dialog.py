@@ -37,24 +37,29 @@ from qgis.PyQt import uic
 from qgis.PyQt.QtWidgets import (
     QDialog, QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
     QLabel, QSpinBox, QPushButton, QListWidget, QListWidgetItem,
-    QTreeView, QMessageBox, QProgressBar, QGroupBox, QFormLayout,
+    QTreeView, QMessageBox, QProgressBar,
     QTabWidget, QAbstractItemView, QCheckBox, QScrollArea, QAbstractScrollArea,
-    QFileSystemModel, QSizePolicy, QHeaderView,
+    QFileSystemModel, QSizePolicy, QHeaderView, QFrame,
     QLineEdit, QToolButton, QMenu, QAction, QFileDialog, QApplication
 )
 from qgis.PyQt.QtCore import (
-    Qt, QDir, QMimeData, QUrl, pyqtSignal, QThread
+    Qt, QDir, QMimeData, QUrl, pyqtSignal
 )
-from qgis.PyQt.QtGui import QDragEnterEvent, QDropEvent, QPixmap
+from qgis.PyQt.QtGui import QPixmap, QColor
 
-from qgis.gui import QgsFileWidget, QgsMapLayerComboBox, QgsFieldComboBox
+from qgis.gui import (
+    QgsFileWidget, QgsMapLayerComboBox, QgsFieldComboBox,
+    QgsCheckableComboBox, QgsExtentGroupBox, QgsMessageBar,
+)
 from qgis.core import (
     QgsMapLayerProxyModel, QgsVectorLayer, QgsWkbTypes,
-    QgsProject, QgsMessageLog, Qgis,
+    QgsProject, QgsMessageLog, Qgis, QgsTask, QgsApplication,
 )
 
 UI_FILE = os.path.join(os.path.dirname(__file__), 'SZ_edu.ui')
 FORM_CLASS, _ = uic.loadUiType(UI_FILE)
+
+LOG_TAG = 'SZR+'
 
 INFO_DICT = {
     'Weight of Evidence (WoE)': "<b>Weight of Evidence (WoE)</b><br><br><b>Description:</b><br>WoE is a data-driven, bivariate statistical method based on Bayes' rule. For each class of a predictive factor it computes a positive weight (W+) and a negative weight (W-) from the presence or absence of landslides: the higher the contrast, the stronger that class's association with instability.<br><br><b>Inputs Required:</b><br>- Dependent Variable (Landslide inventory).<br>- Independent Variables (Covariates) MUST be classified/categorical.",
@@ -157,14 +162,84 @@ INFO_DICT = {
 # Helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _bold(widget):
+    """Make a widget's font bold without touching its colours.
+
+    Colours are left to the active QGIS theme; only the weight is overridden so
+    the label still reads correctly under both the light and dark UI themes.
+    """
+    font = widget.font()
+    font.setBold(True)
+    widget.setFont(font)
+    return widget
+
+
 def _labeled(label_text, widget):
     """Return a QVBoxLayout with a label above the widget."""
     vbox = QVBoxLayout()
-    lbl = QLabel(label_text)
-    lbl.setStyleSheet("font-weight: bold;")
-    vbox.addWidget(lbl)
+    vbox.addWidget(_bold(QLabel(label_text)))
     vbox.addWidget(widget)
     return vbox
+
+
+def _accent_button(text, base_color):
+    """A coloured action button that stays legible under any QGIS theme.
+
+    The hover/pressed shades are derived from the base colour with QColor so the
+    result is always a valid colour (a plain '#rrggbb' + 'cc' suffix is not a
+    colour Qt style sheets accept, and silently disables the rule).
+    """
+    btn = QPushButton(text)
+    base = QColor(base_color)
+    hover = base.darker(115)
+    pressed = base.darker(135)
+    btn.setStyleSheet(
+        "QPushButton {"
+        f" background:{base.name()}; color:#ffffff; font-weight:bold;"
+        " padding:8px; border:none; border-radius:4px; }"
+        f"QPushButton:hover {{ background:{hover.name()}; }}"
+        f"QPushButton:pressed {{ background:{pressed.name()}; }}"
+        "QPushButton:disabled { background:palette(button); color:palette(mid); }"
+    )
+    return btn
+
+
+def _open_folder(path):
+    """Reveal a results folder in the system file manager."""
+    from qgis.PyQt.QtGui import QDesktopServices
+    if path and os.path.isdir(path):
+        QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+        return True
+    return False
+
+
+def _run_row(run_label, color):
+    """A RUN button with an 'open results folder' button beneath it.
+
+    The second button stays disabled until a run has actually produced output;
+    the folder it points at is stashed on the button itself.
+    """
+    run_btn = _accent_button(run_label, color)
+    open_btn = QPushButton("Open results folder")
+    open_btn.setEnabled(False)
+    open_btn.setToolTip("Enabled once a run has produced results.")
+    open_btn.clicked.connect(
+        lambda: _open_folder(open_btn.property('results_folder')))
+
+    box = QVBoxLayout()
+    box.setSpacing(4)
+    box.addWidget(run_btn)
+    box.addWidget(open_btn)
+    return box, run_btn, open_btn
+
+
+def _scrollable(page):
+    """Wrap a page in a scroll area so tall forms stay usable in a docked panel."""
+    scroll = QScrollArea()
+    scroll.setWidgetResizable(True)
+    scroll.setFrameShape(QFrame.NoFrame)
+    scroll.setWidget(page)
+    return scroll
 
 
 def _file_widget(title="", filter_="All files (*)"):
@@ -174,24 +249,153 @@ def _file_widget(title="", filter_="All files (*)"):
     return fw
 
 
-class WorkerThread(QThread):
-    finished_ok = pyqtSignal(object)
-    error = pyqtSignal(Exception)
+def _extent_widget(title="Extent"):
+    """A native QGIS extent picker (canvas / layer / draw on canvas / manual)."""
+    from qgis.utils import iface
+    box = QgsExtentGroupBox()
+    box.setTitle(title)
+    canvas = iface.mapCanvas() if iface is not None else None
+    if canvas is not None:
+        box.setMapCanvas(canvas)
+        box.setOutputCrs(canvas.mapSettings().destinationCrs())
+        box.setCurrentExtent(canvas.extent(),
+                             canvas.mapSettings().destinationCrs())
+        box.setOutputExtentFromCurrent()
+    return box
 
-    def __init__(self, func, *args, **kwargs):
-        super().__init__()
-        self.func = func
-        self.args = args
-        self.kwargs = kwargs
+
+def _extent_values(box):
+    """Return [xmin, xmax, ymin, ymax] for a QgsExtentGroupBox, or None."""
+    rect = box.outputExtent()
+    if rect is None or rect.isEmpty():
+        return None
+    return [rect.xMinimum(), rect.xMaximum(), rect.yMinimum(), rect.yMaximum()]
+
+
+def _colormap(name):
+    """Fetch a matplotlib colormap.
+
+    matplotlib.cm.get_cmap() is deprecated since 3.7 and scheduled for removal
+    in 3.11, so prefer the modern registry and fall back for older installs.
+    """
+    import matplotlib
+    try:
+        return matplotlib.colormaps[name]
+    except (AttributeError, KeyError):
+        import matplotlib.cm as cm
+        return cm.get_cmap(name)
+
+
+def _style_si_raster(r_lyr):
+    """Render an SI raster with an interpolated RdYlGn_r ramp over its value range."""
+    try:
+        from qgis.core import (QgsRasterShader, QgsColorRampShader,
+                               QgsSingleBandPseudoColorRenderer, QgsRasterBandStats)
+        provider = r_lyr.dataProvider()
+
+        # Compute min/max explicitly to ensure correct values
+        stats = provider.bandStatistics(
+            1, QgsRasterBandStats.Min | QgsRasterBandStats.Max, r_lyr.extent(), 0)
+        min_v = stats.minimumValue
+        max_v = stats.maximumValue
+
+        cmap = _colormap('RdYlGn_r')
+        fnc = QgsColorRampShader()
+        fnc.setColorRampType(QgsColorRampShader.Interpolated)
+        lst = []
+        num_c = 5
+        for i in range(num_c):
+            val = min_v + (max_v - min_v) * (i / (num_c - 1))
+            rgba = cmap(i / (num_c - 1))
+            c = QColor(int(rgba[0] * 255), int(rgba[1] * 255), int(rgba[2] * 255))
+            lst.append(QgsColorRampShader.ColorRampItem(val, c, f"{val:.4f}"))
+
+        fnc.setColorRampItemList(lst)
+        shader = QgsRasterShader()
+        shader.setRasterShaderFunction(fnc)
+
+        renderer = QgsSingleBandPseudoColorRenderer(provider, 1, shader)
+        renderer.setClassificationMin(min_v)
+        renderer.setClassificationMax(max_v)
+
+        r_lyr.setRenderer(renderer)
+        r_lyr.triggerRepaint()
+    except Exception as e:
+        QgsMessageLog.logMessage(f"Error styling SI raster: {e}", LOG_TAG, Qgis.Warning)
+
+
+def _style_si_vector(v_lyr):
+    """Render an SI vector layer graduated in 5 equal-interval RdYlGn_r classes."""
+    try:
+        from qgis.core import (QgsGraduatedSymbolRenderer, QgsRendererRange,
+                               QgsClassificationEqualInterval, QgsSymbol)
+        fields = [f.name() for f in v_lyr.fields()]
+        si_f = next((f for f in ['SI', 'si', 'prediction', 'Prediction',
+                                 'SI_test', 'SI_train'] if f in fields), None)
+        if not si_f:
+            return
+
+        cmap = _colormap('RdYlGn_r')
+        method = QgsClassificationEqualInterval()
+        classes = method.classes(v_lyr, si_f, 5)
+        if not classes:
+            return
+
+        # classes() yields QgsClassificationRange, which carries no symbol; the
+        # renderer needs QgsRendererRange built from each interval.
+        ranges = []
+        for i, c in enumerate(classes):
+            rgba = cmap(i / max(1, len(classes) - 1))
+            color = QColor(int(rgba[0] * 255), int(rgba[1] * 255), int(rgba[2] * 255))
+            sym = QgsSymbol.defaultSymbol(v_lyr.geometryType())
+            sym.setColor(color)
+            ranges.append(QgsRendererRange(c.lowerBound(), c.upperBound(),
+                                           sym, c.label()))
+
+        v_lyr.setRenderer(QgsGraduatedSymbolRenderer(si_f, ranges))
+        v_lyr.triggerRepaint()
+    except Exception as e:
+        QgsMessageLog.logMessage(f"Error styling SI vector: {e}", LOG_TAG, Qgis.Warning)
+
+
+class SzTask(QgsTask):
+    """Runs one SZR+ computation on the QGIS task manager.
+
+    Using QgsTask instead of a bare QThread means every run shows up in the QGIS
+    status-bar progress widget and can be cancelled from there, and Qt guarantees
+    finished() runs on the main thread so layers can be created safely.
+    """
+
+    completed = pyqtSignal(object)
+    failed = pyqtSignal(str)
+
+    def __init__(self, description, func, *args, **kwargs):
+        super().__init__(description, QgsTask.CanCancel)
+        self._func = func
+        self._args = args
+        self._kwargs = kwargs
+        self._result = None
+        self._message = ''
 
     def run(self):
         try:
-            result = self.func(*self.args, **self.kwargs)
-            self.finished_ok.emit(result)
+            self._result = self._func(*self._args, **self._kwargs)
+            return True
         except Exception as e:
             import traceback
-            traceback.print_exc()
-            self.error.emit(e)
+            self._message = str(e)
+            # The full traceback belongs in the QGIS log panel, not in a dialog.
+            QgsMessageLog.logMessage(traceback.format_exc(), LOG_TAG, Qgis.Critical)
+            return False
+
+    def finished(self, result):
+        """Always called on the main thread once run() returns."""
+        if self.isCanceled():
+            return
+        if result:
+            self.completed.emit(self._result)
+        else:
+            self.failed.emit(self._message or 'Unknown error')
 
 
 def load_as_memory_layer(filepath, layername_in_file, display_name):
@@ -395,31 +599,41 @@ class ChartsDialog(QDialog):
     def closeEvent(self, event):
         # Check if there are unsaved charts and if the folder is temporary
         if self.is_temp and len(self.saved_charts) < len(self.png_paths):
-            # Check if parent has "don't ask again" set
-            main_dialog = self.parent()
-            dont_ask = False
-            if main_dialog and hasattr(main_dialog, '_dont_ask_save_png'):
-                dont_ask = main_dialog._dont_ask_save_png
-                
-            if not dont_ask:
-                msg = QMessageBox(self)
-                msg.setIcon(QMessageBox.Question)
-                msg.setText("The charts will be lost if you close this window without saving. Do you want to save them?")
-                msg.setWindowTitle("Unsaved Charts")
-                
-                save_btn = msg.addButton("Save Active Chart...", QMessageBox.AcceptRole)
-                dont_save_btn = msg.addButton("Don't Save", QMessageBox.DestructiveRole)
-                cancel_btn = msg.addButton(QMessageBox.Cancel)
-                
-                cb = QCheckBox("Do not ask me again during this session")
-                msg.setCheckBox(cb)
-                
-                msg.exec_()
-                
-                if msg.clickedButton() == save_btn:
-                    event.ignore()
-                    self.save_current()
-                    return
+            # Check if the panel has "don't ask again" set for this session
+            panel = self.parent()
+            if getattr(panel, '_dont_ask_save_png', False):
+                super().closeEvent(event)
+                return
+
+            msg = QMessageBox(self)
+            msg.setIcon(QMessageBox.Question)
+            msg.setText("The charts will be lost if you close this window without saving. Do you want to save them?")
+            msg.setWindowTitle("Unsaved Charts")
+
+            save_btn = msg.addButton("Save Active Chart...", QMessageBox.AcceptRole)
+            msg.addButton("Don't Save", QMessageBox.DestructiveRole)
+            cancel_btn = msg.addButton(QMessageBox.Cancel)
+
+            cb = QCheckBox("Do not ask me again during this session")
+            msg.setCheckBox(cb)
+
+            msg.exec_()
+            clicked = msg.clickedButton()
+
+            if cb.isChecked() and panel is not None:
+                panel._dont_ask_save_png = True
+
+            if clicked == save_btn:
+                event.ignore()
+                self.save_current()
+                return
+            if clicked == cancel_btn:
+                event.ignore()
+                return
+
+        super().closeEvent(event)
+
+
 class ProcessingOutputWidget(QWidget):
     fileChanged = pyqtSignal(str)
 
@@ -439,17 +653,11 @@ class ProcessingOutputWidget(QWidget):
         
         self.line_edit = QLineEdit()
         self.line_edit.setReadOnly(True)
-        self.line_edit.setStyleSheet("color: gray; font-style: italic;")
-        
-        if self.is_optional:
-            initial_text = "[Optional]"
-        elif self.force_physical:
-            initial_text = "[Specify output folder...]" if is_folder else "[Specify output file...]"
-        elif self.default_text:
-            initial_text = self.default_text
-        else:
-            initial_text = "[Save to temporary folder]" if is_folder else "[Save to temporary file]"
-        self.line_edit.setText(initial_text)
+        # The "no path chosen yet" hint is a placeholder rather than real text, so
+        # Qt greys it out using the active theme's palette instead of a hardcoded
+        # colour that only looks right on a light background.
+        self.line_edit.setPlaceholderText(
+            "[Optional]" if self.is_optional else self._hint_text())
         layout.addWidget(self.line_edit)
         
         self.tool_btn = QToolButton()
@@ -475,25 +683,28 @@ class ProcessingOutputWidget(QWidget):
         self.action_temp.triggered.connect(self.set_temporary)
         self.action_save.triggered.connect(self.prompt_save)
         
+    def _hint_text(self):
+        """Placeholder describing what happens when no explicit path is set."""
+        if self.force_physical:
+            return "[Specify output folder…]" if self.is_folder else "[Specify output file…]"
+        if self.default_text:
+            return self.default_text
+        return "[Save to temporary folder]" if self.is_folder else "[Save to temporary file]"
+
     def set_temporary(self):
         self.is_temp = not self.force_physical
         self._filepath = ""
-        self.line_edit.setStyleSheet("color: gray; font-style: italic;")
-        if self.force_physical:
-            self.line_edit.setText("[Specify output folder...]" if self.is_folder else "[Specify output file...]")
-        elif self.default_text:
-            self.line_edit.setText(self.default_text)
-        else:
-            self.line_edit.setText("[Save to temporary folder]" if self.is_folder else "[Save to temporary file]")
+        self.line_edit.clear()
+        self.line_edit.setPlaceholderText(self._hint_text())
         self.fileChanged.emit("")
-        
+
     def set_optional(self):
         self.is_temp = False
         self._filepath = ""
-        self.line_edit.setStyleSheet("color: gray; font-style: italic;")
-        self.line_edit.setText("[Optional]")
+        self.line_edit.clear()
+        self.line_edit.setPlaceholderText("[Optional]")
         self.fileChanged.emit("")
-        
+
     def prompt_save(self):
         from qgis.PyQt.QtWidgets import QFileDialog
         if self.is_folder:
@@ -511,8 +722,8 @@ class ProcessingOutputWidget(QWidget):
         if path:
             self.is_temp = False
             self._filepath = path
-            self.line_edit.setStyleSheet("")
             self.line_edit.setText(path)
+            self.line_edit.setToolTip(path)
             self.fileChanged.emit(path)
         else:
             if self.is_optional:
@@ -640,35 +851,36 @@ def _make_covariate_selector():
     # Left: Layer Selection
     left = QWidget()
     lv = QVBoxLayout(left)
-    lbl_left = QLabel("Add Independent Variable Raster")
-    lbl_left.setStyleSheet("font-weight: bold;")
-    lv.addWidget(lbl_left)
-    
+    lv.setContentsMargins(0, 0, 0, 0)
+    lv.addWidget(_bold(QLabel("Add Independent Variable Raster")))
+
     layer_combo = QgsMapLayerComboBox()
     layer_combo.setFilters(QgsMapLayerProxyModel.RasterLayer)
     lv.addWidget(layer_combo)
-    
+
     btn_add = QPushButton("Add Selected Layer")
     lv.addWidget(btn_add)
-    
-    btn_browse = QPushButton("Browse Multiple Files...")
+
+    btn_browse = QPushButton("Browse Multiple Files…")
     lv.addWidget(btn_browse)
-    
+
     lv.addStretch()
     splitter.addWidget(left)
 
     # Right: selected rasters
     right = QWidget()
     rv = QVBoxLayout(right)
-    lbl_right = QLabel("Selected Rasters")
-    lbl_right.setStyleSheet("font-weight: bold;")
-    rv.addWidget(lbl_right)
+    rv.setContentsMargins(0, 0, 0, 0)
+    rv.addWidget(_bold(QLabel("Selected Rasters")))
     drop_list = DropListWidget()
     rv.addWidget(drop_list)
     # Remove button
     btn_remove = QPushButton("Remove selected")
-    btn_remove.clicked.connect(lambda: [drop_list.takeItem(drop_list.currentRow())
-                                        for _ in range(1) if drop_list.currentItem()])
+
+    def _remove_selected():
+        for item in drop_list.selectedItems():
+            drop_list.takeItem(drop_list.row(item))
+    btn_remove.clicked.connect(_remove_selected)
     rv.addWidget(btn_remove)
     splitter.addWidget(right)
 
@@ -707,13 +919,10 @@ def _make_raster_page(algo_name: str):
     """
     page = QWidget()
     page_layout = QVBoxLayout(page)
+    page_layout.setContentsMargins(0, 0, 0, 0)
 
-    # Title
-    title = QLabel(algo_name)
-    title.setStyleSheet("font-size: 14px; font-weight: bold; padding: 4px;")
-    page_layout.addWidget(title)
-
-    # Sub-tabs
+    # The selected method is already named by the list on the left and by the
+    # info panel, so the page itself carries no redundant heading.
     sub_tabs = QTabWidget()
     page_layout.addWidget(sub_tabs)
 
@@ -724,16 +933,14 @@ def _make_raster_page(algo_name: str):
         sp_layout = QVBoxLayout(sub_page)
 
         # Landslide raster (now a combo box)
-        inv_lbl = QLabel("Landslide Raster Inventory")
-        inv_lbl.setStyleSheet("font-weight: bold;")
-        sp_layout.addWidget(inv_lbl)
-        
+        sp_layout.addWidget(_bold(QLabel("Landslide Raster Inventory")))
+
         inv_layout = QHBoxLayout()
         inv_combo = QgsMapLayerComboBox()
         inv_combo.setFilters(QgsMapLayerProxyModel.RasterLayer)
         inv_layout.addWidget(inv_combo)
-        
-        btn_inv_browse = QPushButton("Browse...")
+
+        btn_inv_browse = QPushButton("Browse…")
         def _browse_inv(*args, c=inv_combo):
             from qgis.PyQt.QtWidgets import QFileDialog
             f, _ = QFileDialog.getOpenFileName(sub_page, "Select Landslide Raster Inventory", "", "GeoTIFF (*.tif *.tiff)")
@@ -750,9 +957,7 @@ def _make_raster_page(algo_name: str):
 
         # Covariate selector
         cov_splitter, drop_list, _ = _make_covariate_selector()
-        lbl_cov = QLabel("Independent Variables rasters")
-        lbl_cov.setStyleSheet("font-weight: bold;")
-        sp_layout.addWidget(lbl_cov)
+        sp_layout.addWidget(_bold(QLabel("Independent Variables rasters")))
         sp_layout.addWidget(cov_splitter)
 
         # SpinBox label
@@ -798,14 +1003,9 @@ def _make_raster_page(algo_name: str):
         # Auto-fill output folder if empty
         out_raster_refs['fw'].fileChanged.connect(lambda path, f=out_folder: f.setFilePath(os.path.dirname(path)) if path and not f.filePath() else None)
 
-        # RUN button
-        run_btn = QPushButton(f"RUN  —  {algo_name}")
-        run_btn.setStyleSheet(
-            "QPushButton { background:#2d7dd2; color:white; font-weight:bold;"
-            " padding:8px; border-radius:4px; }"
-            "QPushButton:hover { background:#1a5fa3; }"
-        )
-        sp_layout.addWidget(run_btn)
+        # RUN button (+ open results folder)
+        run_box, run_btn, open_btn = _run_row(f"RUN  —  {algo_name}", "#2d7dd2")
+        sp_layout.addLayout(run_box)
         sp_layout.addStretch()
 
         refs[mode] = {
@@ -816,10 +1016,11 @@ def _make_raster_page(algo_name: str):
             'out_test': out_test_refs,
             'folder': out_folder,
             'run_btn': run_btn,
+            'open_btn': open_btn,
         }
 
         tab_title = "SI Binomial Sampler" if mode == "binomial" else "SI k-fold"
-        sub_tabs.addTab(sub_page, tab_title)
+        sub_tabs.addTab(_scrollable(sub_page), tab_title)
 
     refs['sub_tabs'] = sub_tabs
     return page, refs
@@ -831,16 +1032,13 @@ def _make_raster_page(algo_name: str):
 
 def _make_vector_page(algo_name: str):
     """
-    Returns (page_widget, refs).  refs['layer_combo'] is the slope-unit combo.
-    refs[mode]['dep_list'], refs[mode]['dep_selected'], refs[mode]['indep_list']
-    are the field selector widgets.
+    Returns (page_widget, refs).  refs[mode]['layer_combo'] is the slope-unit combo,
+    refs[mode]['dep_combo'] the dependent-variable field and refs[mode]['indep_combo']
+    the checkable list of covariate fields.
     """
     page = QWidget()
     page_layout = QVBoxLayout(page)
-
-    title = QLabel(algo_name)
-    title.setStyleSheet("font-size: 14px; font-weight: bold; padding: 4px;")
-    page_layout.addWidget(title)
+    page_layout.setContentsMargins(0, 0, 0, 0)
 
     sub_tabs = QTabWidget()
     page_layout.addWidget(sub_tabs)
@@ -861,39 +1059,20 @@ def _make_vector_page(algo_name: str):
         dep_combo = QgsFieldComboBox()
         sp_layout.addLayout(_labeled("Dependent Variable Field (0 for absence, >0 for presence)", dep_combo))
 
-        # ── Independent variables (multi-select checklist + mirror panel) ─────
-        field_splitter = QSplitter(Qt.Horizontal)
-
-        # Left: checklist of all fields
-        left = QWidget()
-        lv = QVBoxLayout(left)
-        lbl_indep = QLabel("Independent Variable Fields\n(check all that apply)")
-        lbl_indep.setStyleSheet("font-weight: bold;")
-        lv.addWidget(lbl_indep)
-        indep_list = QListWidget()
-        indep_list.setToolTip("Fields to use as covariates")
-        lv.addWidget(indep_list)
-        field_splitter.addWidget(left)
-
-        # Right: selected independent-variable fields
-        right = QWidget()
-        rv = QVBoxLayout(right)
-        lbl_indep_sel = QLabel("Selected Independent Fields")
-        lbl_indep_sel.setStyleSheet("font-weight: bold;")
-        rv.addWidget(lbl_indep_sel)
-        indep_selected = QListWidget()
-        indep_selected.setEnabled(False)
-        rv.addWidget(indep_selected)
-        field_splitter.addWidget(right)
-
-        field_splitter.setSizes([280, 280])
-        sp_layout.addWidget(field_splitter)
+        # ── Independent variables ─────────────────────────────────────────────
+        # QgsCheckableComboBox is the native QGIS control for picking several
+        # fields at once; it replaces the old checklist + read-only mirror panel
+        # and shows the current selection in its own line.
+        indep_combo = QgsCheckableComboBox()
+        indep_combo.setToolTip("Fields to use as covariates")
+        indep_combo.setDefaultText("Select the covariate fields…")
+        sp_layout.addLayout(_labeled("Independent Variable Fields", indep_combo))
 
         # SpinBox
         if mode == "binomial":
             spin_lbl = "Percentage of test sample  (0 = fit only)"
         else:
-            spin_lbl = "Number  of k-folds (1 to fit or >1 Corss validate)"
+            spin_lbl = "Number of k-folds  (1 = fit only, >1 = cross-validate)"
         spin = QSpinBox()
         spin.setRange(0, 99) if mode == "binomial" else spin.setRange(1, 50)
         spin.setValue(30) if mode == "binomial" else spin.setValue(5)
@@ -959,29 +1138,24 @@ def _make_vector_page(algo_name: str):
             out_vec_train_refs['fw'].fileChanged.connect(lambda path: auto_populate_folder() if path else None)
         spin.valueChanged.connect(lambda val: auto_populate_folder())
 
-        run_btn = QPushButton(f"RUN  —  {algo_name}")
-        run_btn.setStyleSheet(
-            "QPushButton { background:#27ae60; color:white; font-weight:bold;"
-            " padding:8px; border-radius:4px; }"
-            "QPushButton:hover { background:#1a7d43; }"
-        )
-        sp_layout.addWidget(run_btn)
+        run_box, run_btn, open_btn = _run_row(f"RUN  —  {algo_name}", "#27ae60")
+        sp_layout.addLayout(run_box)
         sp_layout.addStretch()
 
         refs[mode] = {
             'layer_combo': layer_combo,
             'dep_combo': dep_combo,
-            'indep_list': indep_list,
-            'indep_selected': indep_selected,
+            'indep_combo': indep_combo,
             'spin': spin,
             'out_test': out_vec_test_refs,
             'out_train': out_vec_train_refs,
             'folder': out_folder,
             'run_btn': run_btn,
+            'open_btn': open_btn,
         }
 
         tab_title = "SI Binomial Sampler" if mode == "binomial" else "SI k-fold"
-        sub_tabs.addTab(sub_page, tab_title)
+        sub_tabs.addTab(_scrollable(sub_page), tab_title)
 
     refs['sub_tabs'] = sub_tabs
     return page, refs
@@ -994,13 +1168,10 @@ def _make_vector_page(algo_name: str):
 def _simple_page(title: str, params: list, run_label: str, btn_color: str = "#8e44ad"):
     """
     params = list of ('label', widget) tuples.
-    Returns (page, {key: widget, 'run_btn': QPushButton}).
+    Returns (scrollable page, {key: widget, 'run_btn': QPushButton}).
     """
     page = QWidget()
     layout = QVBoxLayout(page)
-    lbl = QLabel(title)
-    lbl.setStyleSheet("font-size:13px; font-weight:bold; padding:4px;")
-    layout.addWidget(lbl)
 
     refs = {}
     for row in params:
@@ -1012,25 +1183,26 @@ def _simple_page(title: str, params: list, run_label: str, btn_color: str = "#8e
         else:
             refs[label_text] = row[1]
             widget = row[1]
-        layout.addLayout(_labeled(label_text, widget))
+        if isinstance(widget, QgsExtentGroupBox):
+            # Already a titled group box — a separate caption would just repeat it.
+            layout.addWidget(widget)
+        else:
+            layout.addLayout(_labeled(label_text, widget))
 
-    run_btn = QPushButton(run_label)
-    run_btn.setStyleSheet(
-        f"QPushButton {{ background:{btn_color}; color:white; font-weight:bold;"
-        " padding:8px; border-radius:4px; }"
-        f"QPushButton:hover {{ background:{btn_color}cc; }}"
-    )
-    layout.addWidget(run_btn)
+    run_box, run_btn, open_btn = _run_row(run_label, btn_color)
+    layout.addLayout(run_box)
     layout.addStretch()
     refs['run_btn'] = run_btn
-    return page, refs
+    refs['open_btn'] = open_btn
+    return _scrollable(page), refs
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Main Dialog
 # ─────────────────────────────────────────────────────────────────────────────
 
-class SzEduDialog(QDialog, FORM_CLASS):
+class SzEduPanel(QWidget, FORM_CLASS):
+    """The SZR+ panel. Hosted inside a QgsDockWidget by the plugin entry point."""
 
     ALGO_KEYS_R = ['woe', 'fr', 'lr', 'rf', 'svm', 'dt']
     ALGO_NAMES  = [
@@ -1042,78 +1214,102 @@ class SzEduDialog(QDialog, FORM_CLASS):
         'Decision Trees (DT)',
     ]
 
+    # Where each list's pages start inside its QStackedWidget.
+    DP_PAGE_OFFSET   = 6    # Data Preparation, in stackedWidget_v
+    CL_V_PAGE_OFFSET = 16   # Classify SI (vector), in stackedWidget_v
+    CL_R_PAGE_OFFSET = 6    # Classify SI (raster), in stackedWidget_r
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setupUi(self)
-        self.setWindowTitle("SZR+ (Susceptibility Zoning + Raster capabilities)")
         self.lbl_cl_r_title.setText("Classify SI Raster")
 
         self._is_running = False
-        self._workers = []
+        self._task = None
         self._mem_datasets = {}
+        self._child_dialogs = []
+        self._dont_ask_save_png = False
 
         # Storage for widget references
-        self._raster_refs = {}   # key: algo_name str -> {'binomial':…, 'kfold':…}
-        self._vector_refs = {}   # key: algo_name str
+        self._raster_refs = {}   # key: algo key str -> {'binomial':…, 'kfold':…}
+        self._vector_refs = {}   # key: algo key str
         self._dp_refs     = {}   # key: function label
         self._cl_refs     = {}   # key: function label
         self._cl_r_refs   = {}   # key: function label
 
-        # Move Classify Vector list under Data Prep list in Vector tab layout
-        if hasattr(self, 'dataprep_list') and hasattr(self, 'classify_list'):
-            # The Vector Base Tab layout uses horizontal layouts to separate the 3 columns
-            # Column 2 has Data Prep. Column 3 has Classify SI + Stacked Widget
-            # Let's dynamically find their parent layouts and move Classify SI under Data Prep
-            
-            # Find the label for Classify SI
-            cl_label = None
-            parent_widget = self.classify_list.parentWidget()
-            if parent_widget:
-                for child in parent_widget.findChildren(QLabel):
-                    if child.text() == "Classify SI":
-                        cl_label = child
-                        break
-            
-            # Find the layout containing dataprep_list
-            dp_layout = None
-            parent_widget = self.dataprep_list.parentWidget()
-            if parent_widget:
-                # Find the direct layout managing dataprep_list
-                for child in parent_widget.children():
-                    if isinstance(child, QVBoxLayout):
-                        for i in range(child.count()):
-                            item = child.itemAt(i)
-                            if item and item.widget() == self.dataprep_list:
-                                dp_layout = child
-                                break
-                    if dp_layout: break
-            
-            if dp_layout and cl_label:
-                # Add spacing, then the Classify Label, then the Classify List below Data Prep List
-                dp_layout.addSpacing(20)
-                dp_layout.addWidget(cl_label)
-                dp_layout.addWidget(self.classify_list)
+        # Pages are built the first time they are shown. Constructing all 26 of
+        # them up front instantiated dozens of layer/field combos — each one a
+        # live listener on the project — for pages the user may never open.
+        self._lazy_r = {}   # stacked index -> builder callable
+        self._lazy_v = {}
 
-        # Auto-adjust list widths uniformly
+        # Register first: it rewrites classify_list_r, whose (longer) entries
+        # must be present before the lists are measured and sized.
+        self._register_page_builders()
+        self._init_lists()
+        self._init_navigation()
+        self._init_status_area()
+        self._init_info_panel()
+
+        # Default selections (this builds only the two visible pages)
+        self.SIfunct_r.setCurrentRow(0)
+        self.SIfunct_v.setCurrentRow(0)
+        self.dataprep_list.setCurrentRow(-1)
+        self.classify_list.setCurrentRow(-1)
+        self.classify_list_r.setCurrentRow(-1)
+
+        # A docked panel gets no closeEvent when QGIS exits, so the teardown
+        # guard is hooked to the application shutdown instead. PyQt drops the
+        # connection automatically if this panel is destroyed first.
+        app = QgsApplication.instance()
+        if app is not None:
+            app.aboutToQuit.connect(self._mute_layer_widgets)
+
+        self._update_info()
+
+    # ── Construction helpers ─────────────────────────────────────────────────
+
+    def _init_lists(self):
+        """Apply the per-method icons, then size the navigation lists to fit."""
+        from qgis.PyQt.QtGui import QIcon
+        from qgis.PyQt.QtWidgets import QStyle
+
+        lists_to_adjust = (self.SIfunct_r, self.SIfunct_v, self.dataprep_list,
+                           self.classify_list, self.classify_list_r)
+
+        # Icons first: they widen their rows, and sizeHintForColumn() has to see
+        # them. (Measuring before they were set is why the old code needed a
+        # blanket +80 px, which left a wide empty gutter beside every label.)
+        icon_dir = os.path.join(os.path.dirname(__file__), '..', 'images')
+        for idx, key in enumerate(self.ALGO_KEYS_R):
+            icon_path = os.path.join(icon_dir, f"{key}_icon.png")
+            if os.path.exists(icon_path):
+                icon = QIcon(icon_path)
+                for lw in (self.SIfunct_r, self.SIfunct_v):
+                    item = lw.item(idx)
+                    if item:
+                        item.setIcon(icon)
+
+        # Room for the frame plus a scrollbar, so the widest label is never
+        # clipped once a list starts scrolling.
+        style = self.style()
+        scrollbar = style.pixelMetric(QStyle.PM_ScrollBarExtent)
+
         max_width = 0
-        lists_to_adjust = [lw for lw in (self.SIfunct_r, self.SIfunct_v, self.dataprep_list, self.classify_list, self.classify_list_r) if hasattr(self, lw.objectName())]
-        
-        # 1. measure max width
         for lw in lists_to_adjust:
             lw.setSizeAdjustPolicy(QAbstractScrollArea.AdjustToContents)
-            w = lw.sizeHintForColumn(0) + 80 # +80 for icons and scrollbar safety
-            if w > max_width:
-                max_width = w
-                
-        # 2. apply uniform width and height
+            width = lw.sizeHintForColumn(0) + 2 * lw.frameWidth() + scrollbar + 4
+            max_width = max(max_width, width)
+
         for lw in lists_to_adjust:
+            # One shared width keeps the stacked lists aligned in their column.
             lw.setFixedWidth(max_width)
             lw.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.MinimumExpanding)
-            
+
             if lw in (self.SIfunct_r, self.SIfunct_v):
                 lw.setMinimumHeight(170)
             elif lw == self.dataprep_list:
-                lw.setMinimumHeight(240) # Shortened as requested
+                lw.setMinimumHeight(240)
                 lw.setMaximumHeight(260)
             elif lw == self.classify_list:
                 lw.setMinimumHeight(100)
@@ -1121,150 +1317,193 @@ class SzEduDialog(QDialog, FORM_CLASS):
             elif lw == self.classify_list_r:
                 lw.setMaximumHeight(150)
 
+    def _ensure_page(self, stack, lazy, index):
+        """Build the page at `index` if it has not been constructed yet."""
+        builder = lazy.pop(index, None)
+        if builder is None:
+            return
+        page = builder()
+        placeholder = stack.widget(index)
+        if placeholder is not None:
+            stack.removeWidget(placeholder)
+            placeholder.deleteLater()
+        stack.insertWidget(index, page)
 
-        from qgis.PyQt.QtGui import QIcon
-        icon_dir = os.path.join(os.path.dirname(__file__), '..', 'images')
-        for idx, key in enumerate(self.ALGO_KEYS_R):
-            icon_path = os.path.join(icon_dir, f"{key}_icon.png")
-            if os.path.exists(icon_path):
-                icon = QIcon(icon_path)
-                item_r = self.SIfunct_r.item(idx)
-                if item_r:
-                    item_r.setIcon(icon)
-                item_v = self.SIfunct_v.item(idx)
-                if item_v:
-                    item_v.setIcon(icon)
+    def _init_navigation(self):
+        """Wire each navigation list to its stacked widget, building on demand."""
 
-        self._build_raster_tab()
-        self._build_vector_tab()
-        self._build_dataprep_tab()
-        self._build_classify_tab()
-        self._build_classify_raster_tab()
+        def _select(stack, lazy, index, others):
+            self._ensure_page(stack, lazy, index)
+            stack.setCurrentIndex(index)
+            for lw in others:
+                lw.clearSelection()
+                lw.setCurrentRow(-1)
 
-        # Wire list → stacked widget navigation
         def set_r_page(idx):
             if idx >= 0:
-                self.stackedWidget_r.setCurrentIndex(idx)
-                self.classify_list_r.clearSelection()
-                self.classify_list_r.setCurrentRow(-1)
-
+                _select(self.stackedWidget_r, self._lazy_r, idx,
+                        (self.classify_list_r,))
 
         def set_cl_r_page(idx):
             if idx >= 0:
-                # Assuming the first 6 pages are the main raster algos
-                self.stackedWidget_r.setCurrentIndex(6 + idx)
-                self.SIfunct_r.clearSelection()
-                self.SIfunct_r.setCurrentRow(-1)
+                _select(self.stackedWidget_r, self._lazy_r,
+                        self.CL_R_PAGE_OFFSET + idx, (self.SIfunct_r,))
 
-        self.SIfunct_r.currentRowChanged.connect(set_r_page)
-        self.classify_list_r.currentRowChanged.connect(set_cl_r_page)
-        
         def set_v_page(idx):
             if idx >= 0:
-                self.stackedWidget_v.setCurrentIndex(idx)
-                self.dataprep_list.clearSelection()
-                self.dataprep_list.setCurrentRow(-1)
-                self.classify_list.clearSelection()
-                self.classify_list.setCurrentRow(-1)
+                _select(self.stackedWidget_v, self._lazy_v, idx,
+                        (self.dataprep_list, self.classify_list))
 
         def set_dp_page(idx):
             if idx >= 0:
-                self.stackedWidget_v.setCurrentIndex(6 + idx)
-                self.SIfunct_v.clearSelection()
-                self.SIfunct_v.setCurrentRow(-1)
-                self.classify_list.clearSelection()
-                self.classify_list.setCurrentRow(-1)
+                _select(self.stackedWidget_v, self._lazy_v,
+                        self.DP_PAGE_OFFSET + idx,
+                        (self.SIfunct_v, self.classify_list))
 
         def set_cl_page(idx):
             if idx >= 0:
-                self.stackedWidget_v.setCurrentIndex(16 + idx)
-                self.SIfunct_v.clearSelection()
-                self.SIfunct_v.setCurrentRow(-1)
-                self.dataprep_list.clearSelection()
-                self.dataprep_list.setCurrentRow(-1)
+                _select(self.stackedWidget_v, self._lazy_v,
+                        self.CL_V_PAGE_OFFSET + idx,
+                        (self.SIfunct_v, self.dataprep_list))
 
+        self.SIfunct_r.currentRowChanged.connect(set_r_page)
+        self.classify_list_r.currentRowChanged.connect(set_cl_r_page)
         self.SIfunct_v.currentRowChanged.connect(set_v_page)
         self.dataprep_list.currentRowChanged.connect(set_dp_page)
         self.classify_list.currentRowChanged.connect(set_cl_page)
 
-        # Default selections
-        self.SIfunct_r.setCurrentRow(0)
-        self.SIfunct_v.setCurrentRow(0)
-        self.dataprep_list.setCurrentRow(-1)
-        self.classify_list.setCurrentRow(-1)
-        self.classify_list_r.setCurrentRow(-1)
+    def _init_status_area(self):
+        """Message bar, status label, progress bar and the Cancel button."""
+        # An in-panel QgsMessageBar is what QGIS' own Processing dialogs use for
+        # validation and result feedback; it keeps the panel usable while it
+        # reports, unlike the chain of modal dialogs this replaces.
+        self.message_bar = QgsMessageBar()
+        self.message_bar.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
+        self.mainLayout.insertWidget(0, self.message_bar)
 
-        # Status and Progress bar
         status_layout = QHBoxLayout()
         self.status_label = QLabel("Ready")
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
-        
-        # Reset GUI Button
-        self.btn_reset_gui = QPushButton("Reset GUI")
-        self.btn_reset_gui.setStyleSheet(
-            "QPushButton { background:#e74c3c; color:white; font-weight:bold; padding:2px 8px; border-radius:3px; }"
-            "QPushButton:hover { background:#c0392b; }"
-        )
-        self.btn_reset_gui.setToolTip("Force unlock the GUI if a process gets stuck or errors out silently.")
-        self.btn_reset_gui.setVisible(False)  # Only show when running
-        self.btn_reset_gui.clicked.connect(self._reset_gui)
-        
+
+        self.btn_cancel = QPushButton("Cancel")
+        self.btn_cancel.setToolTip("Stop waiting on the current run and unlock the panel.")
+        self.btn_cancel.setVisible(False)   # Only shown while a task is running
+        self.btn_cancel.clicked.connect(self._cancel_run)
+
         status_layout.addWidget(self.status_label)
         status_layout.addWidget(self.progress_bar)
-        status_layout.addWidget(self.btn_reset_gui)
+        status_layout.addWidget(self.btn_cancel)
         self.mainLayout.addLayout(status_layout)
-        
-        from qgis.PyQt.QtWidgets import QTextEdit, QSplitter
+
+    def _init_info_panel(self):
+        """The method description pane, styled from the active theme's palette."""
+        from qgis.PyQt.QtWidgets import QTextEdit
+
         self.info_text = QTextEdit()
         self.info_text.setReadOnly(True)
-        self.info_text.setMinimumWidth(300)
-        self.info_text.setStyleSheet(
-            "QTextEdit { background-color: #f7f9fc; color: #2c3e50; font-size: 13px; font-family: 'Segoe UI'; padding: 10px; border: 1px solid #ccc; border-radius: 4px; }"
-            "QScrollBar:vertical { background: #e8ecf1; width: 12px; margin: 0px; border-radius: 6px; }"
-            "QScrollBar::handle:vertical { background: #a8b2bd; min-height: 30px; border-radius: 6px; }"
-            "QScrollBar::handle:vertical:hover { background: #7f8b98; }"
-            "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }"
-            "QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: none; }"
-            "QScrollBar:horizontal { background: #e8ecf1; height: 12px; margin: 0px; border-radius: 6px; }"
-            "QScrollBar::handle:horizontal { background: #a8b2bd; min-width: 30px; border-radius: 6px; }"
-            "QScrollBar::handle:horizontal:hover { background: #7f8b98; }"
-            "QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0px; }"
-            "QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background: none; }"
-        )
-        
+        self.info_text.setMinimumWidth(280)
+        # Only size and padding are overridden — 13px matches the comfortable
+        # reading size v1.9 used. Colours, font family and scrollbars are left to
+        # QGIS so the panel follows the light and dark UI themes (the previous
+        # hardcoded near-white background and 'Segoe UI' family did neither).
+        self.info_text.setStyleSheet("QTextEdit { padding: 8px; font-size: 13px; }")
+        self.info_text.document().setDefaultStyleSheet(
+            "b { font-weight: 600; }")
+
         splitter = QSplitter(Qt.Horizontal)
         splitter.addWidget(self.mainTabWidget)
         splitter.addWidget(self.info_text)
         splitter.setStretchFactor(0, 3)
         splitter.setStretchFactor(1, 1)
-        self.mainLayout.insertWidget(0, splitter)
-        
+        splitter.setChildrenCollapsible(False)
+        self.mainLayout.insertWidget(1, splitter)
+
         self.mainTabWidget.currentChanged.connect(self._update_info)
         self.SIfunct_r.currentRowChanged.connect(self._update_info)
         self.classify_list_r.currentRowChanged.connect(self._update_info)
         self.SIfunct_v.currentRowChanged.connect(self._update_info)
         self.dataprep_list.currentRowChanged.connect(self._update_info)
         self.classify_list.currentRowChanged.connect(self._update_info)
-        
-        self.adjustSize()
-        self._update_info()
 
-    def closeEvent(self, event):
-        # Defense-in-depth against the QGIS-shutdown access violation: when the
-        # dialog is torn down, mute every layer/field combo so that any layer
-        # removal happening during teardown can't fire a slot against a widget
-        # whose C++ side is already gone. (The slots are also guarded
-        # individually, since project clear during fileExit runs before this.)
+    # ── Feedback helpers ─────────────────────────────────────────────────────
+
+    def _info(self, text, title='SZR+'):
+        self.message_bar.pushMessage(title, text, Qgis.Success, 8)
+
+    def _warn(self, text, title='Missing input'):
+        self.message_bar.pushMessage(title, text, Qgis.Warning, 8)
+
+    def _error(self, text, title='Error'):
+        # No timeout: an error stays until the user dismisses it. The traceback
+        # goes to the QGIS log panel rather than into a modal dialog.
+        self.message_bar.pushMessage(title, text, Qgis.Critical)
+
+    def _log(self, text, level=Qgis.Info):
+        QgsMessageLog.logMessage(text, LOG_TAG, level)
+
+    def _set_results_folder(self, refs, folder):
+        """Point a page's 'Open results folder' button at the run's output."""
+        btn = refs.get('open_btn') if isinstance(refs, dict) else refs
+        if btn is None or not folder:
+            return
+        folder = folder if os.path.isdir(folder) else os.path.dirname(folder)
+        if not folder or not os.path.isdir(folder):
+            return
+        btn.setProperty('results_folder', folder)
+        btn.setEnabled(True)
+        btn.setToolTip(folder)
+
+    def _show_charts(self, folder, algo_name, is_temp):
+        """Open the results charts without blocking the panel or the canvas."""
+        import glob
+        from qgis.PyQt import sip
+        if not glob.glob(os.path.join(folder, "*.png")):
+            return
+        # Drop references to windows the user has already closed.
+        self._child_dialogs = [d for d in self._child_dialogs
+                               if not sip.isdeleted(d) and d.isVisible()]
+        dlg = ChartsDialog(folder, algo_name, is_temp=is_temp, parent=self)
+        self._child_dialogs.append(dlg)
+        dlg.show()
+        dlg.raise_()
+
+    def _mute_layer_widgets(self):
+        """Defense-in-depth against the QGIS-shutdown access violation.
+
+        Mutes every layer/field combo so that the layer removal happening during
+        teardown can't fire a slot against a widget whose C++ side is already
+        gone. (The slots are also guarded individually, since the project clear
+        during fileExit runs before this.) As a docked panel never receives
+        closeEvent on shutdown, this is also wired to the application's
+        aboutToQuit signal.
+        """
         try:
-            for cb in self.findChildren(QgsMapLayerComboBox):
-                cb.blockSignals(True)
-            for cb in self.findChildren(QgsFieldComboBox):
-                cb.blockSignals(True)
+            for widget_type in (QgsMapLayerComboBox, QgsFieldComboBox,
+                                QgsCheckableComboBox):
+                for cb in self.findChildren(widget_type):
+                    cb.blockSignals(True)
         except Exception:
             pass
+
+    def closeEvent(self, event):
+        self._mute_layer_widgets()
         super().closeEvent(event)
+
+    def _mode_info(self, algo_refs):
+        """Description of the active Binomial/k-fold sub-tab for a built page."""
+        if not algo_refs:
+            return ''
+        sub_tabs = algo_refs.get('sub_tabs')
+        if sub_tabs is None:
+            return ''
+        # Refresh the info panel when the user switches sub-tab, once per page.
+        if not getattr(sub_tabs, '_info_connected', False):
+            sub_tabs.currentChanged.connect(self._update_info)
+            sub_tabs._info_connected = True
+        key = 'Binomial Mode Extra' if sub_tabs.currentIndex() == 0 else 'KFold Mode Extra'
+        return INFO_DICT.get(key, '')
 
     def _update_info(self, *args):
         tab_idx = self.mainTabWidget.currentIndex()
@@ -1280,13 +1519,9 @@ class SzEduDialog(QDialog, FORM_CLASS):
                     if text_name:
                         text_name = text_name.replace("- Dependent Variable (Landslide inventory).", "- Dependent Variable (Landslide Raster Inventory): Binary raster with value 1 for presence and 0 for absence of landslide.")
                     curr_stack_idx = self.stackedWidget_r.currentIndex()
-                    if curr_stack_idx >= 0 and curr_stack_idx < len(self.ALGO_KEYS_R):
+                    if 0 <= curr_stack_idx < len(self.ALGO_KEYS_R):
                         algo_key = self.ALGO_KEYS_R[curr_stack_idx]
-                        sub_tabs = self._raster_refs[algo_key]['sub_tabs']
-                        extra_text = INFO_DICT.get('Binomial Mode Extra', '') if sub_tabs.currentIndex() == 0 else INFO_DICT.get('KFold Mode Extra', '')
-                        if not hasattr(sub_tabs, '_info_connected'):
-                            sub_tabs.currentChanged.connect(self._update_info)
-                            sub_tabs._info_connected = True
+                        extra_text = self._mode_info(self._raster_refs.get(algo_key))
 
                 elif self.classify_list_r.currentItem() and self.classify_list_r.currentRow() != -1:
                     name = self.classify_list_r.currentItem().text()
@@ -1314,13 +1549,9 @@ class SzEduDialog(QDialog, FORM_CLASS):
                         else:
                             text_name = text_name.replace("- Dependent Variable (Landslide inventory).", "- Slope Units Vector layer which contains the dependent variables and independent variables as fields in the attribute table.")
                     curr_stack_idx = self.stackedWidget_v.currentIndex()
-                    if curr_stack_idx >= 0 and curr_stack_idx < len(self.ALGO_KEYS_R):
+                    if 0 <= curr_stack_idx < len(self.ALGO_KEYS_R):
                         algo_key = self.ALGO_KEYS_R[curr_stack_idx]
-                        sub_tabs = self._vector_refs[algo_key]['sub_tabs']
-                        extra_text = INFO_DICT.get('Binomial Mode Extra', '') if sub_tabs.currentIndex() == 0 else INFO_DICT.get('KFold Mode Extra', '')
-                        if not hasattr(sub_tabs, '_info_connected'):
-                            sub_tabs.currentChanged.connect(self._update_info)
-                            sub_tabs._info_connected = True
+                        extra_text = self._mode_info(self._vector_refs.get(algo_key))
 
                 elif self.dataprep_list.currentItem() and self.dataprep_list.currentRow() != -1:
                     name = self.dataprep_list.currentItem().text()
@@ -1337,42 +1568,57 @@ class SzEduDialog(QDialog, FORM_CLASS):
         except Exception:
             self.info_text.setText("Method info unavailable.")
 
+    def _set_inputs_enabled(self, enabled):
+        for w in (self.stackedWidget_r, self.stackedWidget_v,
+                  self.SIfunct_r, self.SIfunct_v,
+                  self.dataprep_list, self.classify_list, self.classify_list_r):
+            w.setEnabled(enabled)
+
     def _set_running(self, text):
         self._is_running = True
         self.status_label.setText(text)
-        self.progress_bar.setRange(0, 0) # Indeterminate
-        if hasattr(self, 'btn_reset_gui'):
-            self.btn_reset_gui.setVisible(True)
-        for w in (self.stackedWidget_r, self.stackedWidget_v, self.SIfunct_r, self.SIfunct_v, self.dataprep_list, self.classify_list):
-            w.setEnabled(False)
+        self.progress_bar.setRange(0, 0)   # Indeterminate
+        self.btn_cancel.setVisible(True)
+        self._set_inputs_enabled(False)
         QApplication.processEvents()
 
-    def _set_finished(self):
+    def _set_finished(self, status="Finished run", progress=100):
         self._is_running = False
-        self.status_label.setText("Finished run")
+        self._task = None
+        self.status_label.setText(status)
         self.progress_bar.setRange(0, 100)
-        self.progress_bar.setValue(100)
-        if hasattr(self, 'btn_reset_gui'):
-            self.btn_reset_gui.setVisible(False)
-        for w in (self.stackedWidget_r, self.stackedWidget_v, self.SIfunct_r, self.SIfunct_v, self.dataprep_list, self.classify_list):
-            w.setEnabled(True)
+        self.progress_bar.setValue(progress)
+        self.btn_cancel.setVisible(False)
+        self._set_inputs_enabled(True)
 
-    def _reset_gui(self):
-        """Force unlock the GUI if a process gets stuck or errors out silently."""
-        self._is_running = False
-        self.status_label.setText("GUI Reset (Ready)")
-        self.progress_bar.setRange(0, 100)
-        self.progress_bar.setValue(0)
-        if hasattr(self, 'btn_reset_gui'):
-            self.btn_reset_gui.setVisible(False)
-        for w in (self.stackedWidget_r, self.stackedWidget_v, self.SIfunct_r, self.SIfunct_v, self.dataprep_list, self.classify_list):
-            w.setEnabled(True)
-        # Terminate any stranded worker threads
-        for worker in self._workers:
-            if worker.isRunning():
-                worker.terminate()
-                worker.wait()
-        self._workers.clear()
+    def _cancel_run(self):
+        """Stop waiting on the current task and hand the panel back to the user."""
+        task = self._task
+        if task is not None:
+            try:
+                task.cancel()
+            except RuntimeError:
+                pass   # already finished and deleted on the C++ side
+            self._log("Run cancelled by the user.", Qgis.Warning)
+        self._set_finished(status="Cancelled", progress=0)
+
+    def _start_task(self, description, func, *args, on_success=None, on_error=None):
+        """Run `func` on the QGIS task manager and unlock the panel when it ends."""
+        task = SzTask(description, func, *args)
+
+        def _handle_error(message):
+            self._set_finished(status="Error during run", progress=0)
+            self._error(f"{description} failed: {message}. "
+                        "See the SZR+ tab of the Log Messages panel for details.")
+
+        if on_success is not None:
+            task.completed.connect(on_success)
+        task.failed.connect(on_error if on_error is not None else _handle_error)
+
+        self._task = task
+        self._set_running(description)
+        QgsApplication.taskManager().addTask(task)
+        return task
 
     def load_raster_as_memory_layer(self, disk_path, display_name):
         """Copy a temporary raster file from disk into GDAL's MEM driver,
@@ -1536,388 +1782,308 @@ class SzEduDialog(QDialog, FORM_CLASS):
                 return tempfile.mktemp(suffix=suffix or "", prefix=prefix or "SZ_temp_")
             return w.filePath()
 
-    # ── Raster Base ──────────────────────────────────────────────────────────
+    # ── Lazy page registration ───────────────────────────────────────────────
 
-    def _build_raster_tab(self):
+    def _register_page_builders(self):
+        """Record how to build each page, without building any of them yet."""
         for i, (key, name) in enumerate(zip(self.ALGO_KEYS_R, self.ALGO_NAMES)):
-            page, refs = _make_raster_page(name)
-            self._raster_refs[key] = refs
+            self._lazy_r[i] = (lambda k=key, n=name: self._build_raster_page(k, n))
+            self._lazy_v[i] = (lambda k=key, n=name: self._build_vector_page(k, n))
 
-            # Replace the empty placeholder page in the stacked widget
-            stacked = self.stackedWidget_r
-            stacked.removeWidget(stacked.widget(i))
-            stacked.insertWidget(i, page)
+        self._register_dataprep_builders()
+        self._register_classify_builders()
+        self._register_classify_raster_builders()
 
-            # Connect RUN buttons
-            refs['binomial']['run_btn'].clicked.connect(
-                lambda checked=False, k=key: self._run_raster(k, 'binomial'))
-            refs['kfold']['run_btn'].clicked.connect(
-                lambda checked=False, k=key: self._run_raster(k, 'kfold'))
+    def _build_raster_page(self, key, name):
+        page, refs = _make_raster_page(name)
+        self._raster_refs[key] = refs
+        refs['binomial']['run_btn'].clicked.connect(
+            lambda checked=False, k=key: self._run_raster(k, 'binomial'))
+        refs['kfold']['run_btn'].clicked.connect(
+            lambda checked=False, k=key: self._run_raster(k, 'kfold'))
+        return page
 
-    # ── Vector Base ──────────────────────────────────────────────────────────
-
-    def _build_vector_tab(self):
-        for i, (key, name) in enumerate(zip(self.ALGO_KEYS_R, self.ALGO_NAMES)):
-            page, refs = _make_vector_page(name)
-            self._vector_refs[key] = refs
-
-            stacked = self.stackedWidget_v
-            stacked.removeWidget(stacked.widget(i))
-            stacked.insertWidget(i, page)
-
-            for mode in ('binomial', 'kfold'):
-                # Connect layer combo → field population
-                refs[mode]['layer_combo'].layerChanged.connect(
-                    lambda lyr, k=key, m=mode: self._populate_vector_fields(k, m, lyr))
-                refs[mode]['indep_list'].itemChanged.connect(
-                    lambda item, k=key, m=mode: self._sync_indep_selected(k, m))
-
-            # Connect RUN buttons
-            refs['binomial']['run_btn'].clicked.connect(
-                lambda checked=False, k=key: self._run_vector(k, 'binomial'))
-            refs['kfold']['run_btn'].clicked.connect(
-                lambda checked=False, k=key: self._run_vector(k, 'kfold'))
+    def _build_vector_page(self, key, name):
+        page, refs = _make_vector_page(name)
+        self._vector_refs[key] = refs
+        for mode in ('binomial', 'kfold'):
+            layer_combo = refs[mode]['layer_combo']
+            layer_combo.layerChanged.connect(
+                lambda lyr, k=key, m=mode: self._populate_vector_fields(k, m, lyr))
+            # The combo pre-selects a layer when the project already has one, so
+            # layerChanged never fires for it. Populate once up front, otherwise
+            # the field selectors stay empty until the user re-picks the layer.
+            self._populate_vector_fields(key, mode, layer_combo.currentLayer())
+        refs['binomial']['run_btn'].clicked.connect(
+            lambda checked=False, k=key: self._run_vector(k, 'binomial'))
+        refs['kfold']['run_btn'].clicked.connect(
+            lambda checked=False, k=key: self._run_vector(k, 'kfold'))
+        return page
 
     def _populate_vector_fields(self, key: str, mode: str, layer):
-        """Populate indep_list and dep_combo with fields from the chosen layer."""
-        refs = self._vector_refs[key]
-        fields = []
-        if layer and layer.isValid():
-            fields = [f.name() for f in layer.fields()]
+        """Populate the dependent/independent field selectors from the chosen layer."""
+        from qgis.PyQt import sip
 
+        refs = self._vector_refs.get(key)
+        if not refs:
+            return
         dep_combo   = refs[mode]['dep_combo']
-        indep_list  = refs[mode]['indep_list']
-        indep_sel   = refs[mode]['indep_selected']
+        indep_combo = refs[mode]['indep_combo']
 
-        dep_combo.setLayer(layer)
-        
-        indep_list.blockSignals(True)
-        indep_list.clear()
-        indep_sel.clear()
+        # During QGIS shutdown the project is cleared and every layer removed,
+        # which fires layerChanged while the C++ widgets are mid-teardown.
+        if sip.isdeleted(dep_combo) or sip.isdeleted(indep_combo):
+            return
+        try:
+            valid = layer is not None and not sip.isdeleted(layer) and layer.isValid()
+        except (RuntimeError, AttributeError):
+            valid = False
 
-        for fname in fields:
-            item = QListWidgetItem(fname)
-            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-            item.setCheckState(Qt.Unchecked)
-            indep_list.addItem(item)
+        dep_combo.setLayer(layer if valid else None)
 
-        indep_list.blockSignals(False)
-
-    def _sync_indep_selected(self, key: str, mode: str):
-        """Mirror checked items from indep_list into indep_selected."""
-        refs   = self._vector_refs[key][mode]
-        indep_list = refs['indep_list']
-        indep_sel  = refs['indep_selected']
-        indep_sel.clear()
-        for i in range(indep_list.count()):
-            item = indep_list.item(i)
-            if item.checkState() == Qt.Checked:
-                indep_sel.addItem(item.text())
+        indep_combo.blockSignals(True)
+        indep_combo.clear()
+        if valid:
+            indep_combo.addItems([f.name() for f in layer.fields()])
+        indep_combo.blockSignals(False)
 
     # ── Data Preparation ─────────────────────────────────────────────────────
 
-    def _build_dataprep_tab(self):
+    def _register_dataprep_builders(self):
         cb_stats_lyr = self._vl_combo()
         cb_stats_fld = QgsFieldComboBox()
-        cb_stats_lyr.layerChanged.connect(cb_stats_fld.setLayer)
-
-        cb_graphs_lyr = self._vl_combo()
-        cb_graphs_fld = QgsFieldComboBox()
-        cb_graphs_lyr.layerChanged.connect(cb_graphs_fld.setLayer)
-
-        cb_txt_lyr = self._vl_combo()
-        cb_txt_fld = QgsFieldComboBox()
-        cb_txt_lyr.layerChanged.connect(cb_txt_fld.setLayer)
-
-        cb_quant_lyr = self._vl_combo()
-        cb_quant_fld = QgsFieldComboBox()
-        cb_quant_lyr.layerChanged.connect(cb_quant_fld.setLayer)
-        
-        cb_corr_lyr = self._vl_combo()
-        corr_list = QListWidget()
-        def _pop_corr_fields(lyr):
-            from qgis.PyQt import sip
-            # During QGIS shutdown the project is cleared and every layer is
-            # removed, which makes the combo emit layerChanged while the C++
-            # widgets/layers are mid-teardown. Touching a deleted object here
-            # is an access violation (not a catchable Python exception), so bail
-            # out if anything we need has already been deleted.
-            if sip.isdeleted(corr_list):
-                return
-            corr_list.clear()
-            try:
-                valid = lyr is not None and not sip.isdeleted(lyr) and lyr.isValid()
-            except (RuntimeError, AttributeError):
-                valid = False
-            if valid:
-                from qgis.PyQt.QtWidgets import QListWidgetItem
-                for f in lyr.fields():
-                    item = QListWidgetItem(f.name())
-                    item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-                    item.setCheckState(Qt.Unchecked)
-                    corr_list.addItem(item)
-        cb_corr_lyr.layerChanged.connect(_pop_corr_fields)
-
-        csv_stats_out_widget, csv_stats_out_refs = _file_widget_temp("Output csv", "CSV (*.csv)")
-
-        from qgis.PyQt.QtWidgets import QLineEdit
-        def _line_edit(placeholder):
-            le = QLineEdit()
-            le.setPlaceholderText(placeholder)
-            return le
+        """Register the Data Preparation pages (built on first display)."""
 
         def _shp_out(title):
             return _file_widget_temp(title, "ESRI Shapefile (*.shp)")
-            
+
         def _tif_out(title):
             return _file_widget_temp(title, "GeoTIFF (*.tif *.tiff)")
 
-        # Generate widgets once so we can capture their refs
-        clean_pts_out_widget, clean_pts_out_refs = _shp_out("Output shapefile")
-        pkstat_out_widget, pkstat_out_refs = _shp_out("Output shapefile")
-        psamp1_out_widget, psamp1_out_refs = _shp_out("Output Layer Sample")
-        psamp2_out_widget, psamp2_out_refs = _shp_out("Output Layer 1-Sample")
-        p2grid_out_widget, p2grid_out_refs = _tif_out("Output raster")
-        poly2grid_out_widget, poly2grid_out_refs = _tif_out("Output raster")
-
-        pages_cfg = [
-            ("Clean Points By Raster Kernel", [
+        def _clean_points():
+            out_w, out_refs = _shp_out("Output shapefile")
+            return [
                 ("Input Points Layer (vector)", self._vl_combo()),
                 ("Raster Kernel Layer", _file_widget("Raster", "GeoTIFF (*.tif *.tiff)")),
-                ("Extent Coordinates (xmin,xmax,ymin,ymax)", _line_edit("e.g. 10.0, 20.0, 30.0, 40.0")),
+                ("Extent", _extent_widget("Extent (optional)")),
                 ("Buffer Radius (pixels)", self._spinbox(1, 100, 4)),
                 ("Min Value Acceptable", self._spinbox(-9999, 9999, 3)),
-                ("Output Vector Layer", clean_pts_out_refs, clean_pts_out_widget),
-            ]),
-            ("Attribute Table Statistics", [
-                ("Input Layer (vector)", cb_stats_lyr),
-                ("ID Field", cb_stats_fld),
-                ("Output CSV", csv_stats_out_refs, csv_stats_out_widget),
+                ("Output Vector Layer", out_refs, out_w),
+            ]
+
+        def _attr_stats():
+            lyr, fld = self._layer_field_pair()
+            csv_w, csv_refs = _file_widget_temp("Output csv", "CSV (*.csv)")
+            return [
+                ("Input Layer (vector)", lyr),
+                ("ID Field", fld),
+                ("Output CSV", csv_refs, csv_w),
                 ("Output Folder", _folder_widget()),
-            ]),
-            ("Points Kernel Statistics", [
+            ]
+
+        def _kernel_stats():
+            out_w, out_refs = _shp_out("Output shapefile")
+            return [
                 ("Input Points Layer (vector)", self._vl_combo()),
                 ("Raster Kernel Layer", _file_widget("Raster", "GeoTIFF (*.tif *.tiff)")),
                 ("Mask Polygon Layer (vector)", self._vl_combo()),
                 ("Buffer Radius (pixels)", self._spinbox(1, 100, 4)),
-                ("Output Vector Layer", pkstat_out_refs, pkstat_out_widget),
-            ]),
-            ("Points Kernel Graphs", [
-                ("Input Points Layer (vector)", cb_graphs_lyr),
-                ("ID Field", cb_graphs_fld),
+                ("Output Vector Layer", out_refs, out_w),
+            ]
+
+        def _kernel_graphs():
+            lyr, fld = self._layer_field_pair()
+            return [
+                ("Input Points Layer (vector)", lyr),
+                ("ID Field", fld),
                 ("Output Folder", _folder_widget()),
-            ]),
-            ("Points Sampler", [
+            ]
+
+        def _points_sampler():
+            out1_w, out1_refs = _shp_out("Output Layer Sample")
+            out2_w, out2_refs = _shp_out("Output Layer 1-Sample")
+            return [
                 ("Input Points Layer (vector)", self._vl_combo()),
                 ("Mask Polygon Layer (vector)", self._vl_combo()),
                 ("Pixel Width", self._spinbox(1, 10000, 10)),
                 ("Pixel Height", self._spinbox(1, 10000, 10)),
                 ("Sample (%)", self._spinbox(1, 100, 70)),
-                ("Output Layer Sample", psamp1_out_refs, psamp1_out_widget),
-                ("Output Layer 1-Sample", psamp2_out_refs, psamp2_out_widget),
-            ]),
-            ("Points To Grid", [
+                ("Output Layer Sample", out1_refs, out1_w),
+                ("Output Layer 1-Sample", out2_refs, out2_w),
+            ]
+
+        def _points_to_grid():
+            out_w, out_refs = _tif_out("Output raster")
+            return [
                 ("Input Points Layer (vector)", self._vl_combo()),
                 ("Reference Raster", _file_widget("Reference raster", "GeoTIFF (*.tif *.tiff)")),
-                ("Extent Coordinates (xmin,xmax,ymin,ymax)", _line_edit("e.g. 10.0, 20.0, 30.0, 40.0")),
-                ("Output Raster", p2grid_out_refs, p2grid_out_widget),
-            ]),
-            ("Poly To Grid", [
+                ("Extent", _extent_widget("Extent")),
+                ("Output Raster", out_refs, out_w),
+            ]
+
+        def _poly_to_grid():
+            out_w, out_refs = _tif_out("Output raster")
+            return [
                 ("Input Polygon Layer (vector)", self._vl_combo()),
                 ("Pixel Width", self._spinbox(1, 10000, 10)),
                 ("Pixel Height", self._spinbox(1, 10000, 10)),
-                ("Output Raster", poly2grid_out_refs, poly2grid_out_widget),
-            ]),
-            ("Classify Field by .txt File", [
-                ("Input Layer (vector)", cb_txt_lyr),
+                ("Output Raster", out_refs, out_w),
+            ]
+
+        def _classify_txt():
+            lyr, fld = self._layer_field_pair()
+            return [
+                ("Input Layer (vector)", lyr),
                 ("Classification .txt File", _file_widget("Classes txt", "Text (*.txt)")),
-                ("Field to Classify", cb_txt_fld),
-                ("New Field Name", _line_edit("e.g. class_id")),
-            ]),
-            ("Classify Field in Quantiles", [
-                ("Input Layer (vector)", cb_quant_lyr),
-                ("Field to Classify", cb_quant_fld),
-                ("New Field Name", _line_edit("e.g. class_id")),
+                ("Field to Classify", fld),
+                ("New Field Name", self._line_edit("e.g. class_id")),
+            ]
+
+        def _classify_quantiles():
+            lyr, fld = self._layer_field_pair()
+            return [
+                ("Input Layer (vector)", lyr),
+                ("Field to Classify", fld),
+                ("New Field Name", self._line_edit("e.g. class_id")),
                 ("Number of Quantiles (4=quartiles, 10=deciles)", self._spinbox(2, 100, 10)),
-            ]),
-            ("Correlation Plot", [
-                ("Input Layer (vector)", cb_corr_lyr),
-                ("Continuous Independent Variables", corr_list),
+            ]
+
+        def _corr_plot():
+            lyr, fields = self._layer_fields_pair()
+            return [
+                ("Input Layer (vector)", lyr),
+                ("Continuous Independent Variables", fields),
                 ("Output Folder", _folder_widget()),
-            ]),
+            ]
+
+        pages_cfg = [
+            ("Clean Points By Raster Kernel", _clean_points),
+            ("Attribute Table Statistics", _attr_stats),
+            ("Points Kernel Statistics", _kernel_stats),
+            ("Points Kernel Graphs", _kernel_graphs),
+            ("Points Sampler", _points_sampler),
+            ("Points To Grid", _points_to_grid),
+            ("Poly To Grid", _poly_to_grid),
+            ("Classify Field by .txt File", _classify_txt),
+            ("Classify Field in Quantiles", _classify_quantiles),
+            ("Correlation Plot", _corr_plot),
         ]
 
-        stacked = self.stackedWidget_v
-        for i, (title, params) in enumerate(pages_cfg):
-            page, refs = _simple_page(title, params, f"RUN  —  {title}", "#8e44ad")
-            self._dp_refs[title] = refs
-            stacked.removeWidget(stacked.widget(i + 6))
-            stacked.insertWidget(i + 6, page)
-            refs['run_btn'].clicked.connect(
-                lambda checked=False, t=title: self._run_dataprep(t))
+        for i, (title, params_fn) in enumerate(pages_cfg):
+            self._lazy_v[self.DP_PAGE_OFFSET + i] = (
+                lambda t=title, fn=params_fn: self._make_simple_page(
+                    t, fn(), self._dp_refs, self._run_dataprep, "#8e44ad"))
+
+    def _make_simple_page(self, title, params, store, handler, color):
+        """Build one parameter-form page and remember its widget references."""
+        page, refs = _simple_page(title, params, f"RUN  —  {title}", color)
+        store[title] = refs
+        refs['run_btn'].clicked.connect(
+            lambda checked=False, t=title: handler(t))
+        return page
 
     # ── Classify SI ──────────────────────────────────────────────────────────
 
-    def _build_classify_tab(self):
-        cb_roc_lyr = self._vl_combo()
-        cb_roc_si = QgsFieldComboBox()
-        cb_roc_dep = QgsFieldComboBox()
-        cb_roc_lyr.layerChanged.connect(cb_roc_si.setLayer)
-        cb_roc_lyr.layerChanged.connect(cb_roc_dep.setLayer)
+    def _register_classify_builders(self):
+        """Register the vector Classify SI pages (built on first display)."""
 
-        cb_rocw_lyr = self._vl_combo()
-        cb_rocw_si = QgsFieldComboBox()
-        cb_rocw_dep = QgsFieldComboBox()
-        cb_rocw_w = QgsFieldComboBox()
-        cb_rocw_lyr.layerChanged.connect(cb_rocw_si.setLayer)
-        cb_rocw_lyr.layerChanged.connect(cb_rocw_dep.setLayer)
-        cb_rocw_lyr.layerChanged.connect(cb_rocw_w.setLayer)
+        def _classify_roc():
+            lyr, si, dep = self._layer_field_pair(2)
+            return [
+                ("Input Layer (vector)", lyr),
+                ("SI Field", si),
+                ("Dependent Variable Field", dep),
+                ("Number of Classes (from 2 to 10)", self._spinbox(2, 10, 5)),
+                ("Output Folder", _folder_widget()),
+            ]
 
-        cb_gen_lyr = self._vl_combo()
-        cb_gen_si = QgsFieldComboBox()
-        cb_gen_dep = QgsFieldComboBox()
-        cb_gen_lyr.layerChanged.connect(cb_gen_si.setLayer)
-        cb_gen_lyr.layerChanged.connect(cb_gen_dep.setLayer)
+        def _classify_rocw():
+            lyr, si, dep, weight = self._layer_field_pair(3)
+            return [
+                ("Input Layer (vector)", lyr),
+                ("SI Field", si),
+                ("Dependent Variable Field", dep),
+                ("Weight Field", weight),
+                ("Number of Classes (from 2 to 10)", self._spinbox(2, 10, 5)),
+                ("Output Folder", _folder_widget()),
+            ]
 
-        cb_cm_lyr = self._vl_combo()
-        cb_cm_si = QgsFieldComboBox()
-        cb_cm_dep = QgsFieldComboBox()
-        cb_cm_lyr.layerChanged.connect(cb_cm_si.setLayer)
-        cb_cm_lyr.layerChanged.connect(cb_cm_dep.setLayer)
-        
-        cm_out_widget, cm_out_refs = _file_widget_temp("Output GeoPackage", "GeoPackage (*.gpkg)")
+        def _roc_generator():
+            lyr, si, dep = self._layer_field_pair(2)
+            return [
+                ("Input Layer (vector)", lyr),
+                ("SI Field", si),
+                ("Dependent Variable Field", dep),
+                ("Output Folder", _folder_widget()),
+            ]
+
+        def _confusion_matrix():
+            lyr, si, dep = self._layer_field_pair(2)
+            out_w, out_refs = _file_widget_temp("Output GeoPackage", "GeoPackage (*.gpkg)")
+            return [
+                ("Input Layer (vector)", lyr),
+                ("SI Field", si),
+                ("Dependent Variable Field", dep),
+                ("Cutoff percentile (0 = Youden)", self._spinbox(0, 100, 0)),
+                ("Output GeoPackage", out_refs, out_w),
+            ]
 
         pages_cfg = [
-            ("Classify Vector by ROC", [
-                ("Input Layer (vector)", cb_roc_lyr),
-                ("SI Field", cb_roc_si),
-                ("Dependent Variable Field", cb_roc_dep),
-                ("Number of Classes (from 2 to 10)", self._spinbox(2, 10, 5)),
-                ("Output Folder", _folder_widget()),
-            ]),
-            ("Classify Vector by Weighted ROC", [
-                ("Input Layer (vector)", cb_rocw_lyr),
-                ("SI Field", cb_rocw_si),
-                ("Dependent Variable Field", cb_rocw_dep),
-                ("Weight Field", cb_rocw_w),
-                ("Number of Classes (from 2 to 10)", self._spinbox(2, 10, 5)),
-                ("Output Folder", _folder_widget()),
-            ]),
-            ("ROC Generator", [
-                ("Input Layer (vector)", cb_gen_lyr),
-                ("SI Field", cb_gen_si),
-                ("Dependent Variable Field", cb_gen_dep),
-                ("Output Folder", _folder_widget()),
-            ]),
-            ("Confusion Matrix (FP/TN Threshold)", [
-                ("Input Layer (vector)", cb_cm_lyr),
-                ("SI Field", cb_cm_si),
-                ("Dependent Variable Field", cb_cm_dep),
-                ("Cutoff percentile (0 = Youden)", self._spinbox(0, 100, 0)),
-                ("Output GeoPackage", cm_out_refs, cm_out_widget),
-            ]),
+            ("Classify Vector by ROC", _classify_roc),
+            ("Classify Vector by Weighted ROC", _classify_rocw),
+            ("ROC Generator", _roc_generator),
+            ("Confusion Matrix (FP/TN Threshold)", _confusion_matrix),
         ]
 
-        stacked = self.stackedWidget_v
-        for i, (title, params) in enumerate(pages_cfg):
-            page, refs = _simple_page(title, params, f"RUN  —  {title}", "#c0392b")
-            self._cl_refs[title] = refs
-            stacked.removeWidget(stacked.widget(i + 16))
-            stacked.insertWidget(i + 16, page)
-            refs['run_btn'].clicked.connect(
-                lambda checked=False, t=title: self._run_classify(t))
+        for i, (title, params_fn) in enumerate(pages_cfg):
+            self._lazy_v[self.CL_V_PAGE_OFFSET + i] = (
+                lambda t=title, fn=params_fn: self._make_simple_page(
+                    t, fn(), self._cl_refs, self._run_classify, "#c0392b"))
 
-    def _build_classify_raster_tab(self):
-        cb_roc_inv = QgsMapLayerComboBox()
-        cb_roc_inv.setFilters(QgsMapLayerProxyModel.RasterLayer)
-        cb_roc_inv.setAllowEmptyLayer(True)
-        cb_roc_si = QgsMapLayerComboBox()
-        cb_roc_si.setFilters(QgsMapLayerProxyModel.RasterLayer)
-        cb_roc_si.setAllowEmptyLayer(True)
+    def _register_classify_raster_builders(self):
+        """Register the raster Classify SI pages (built on first display)."""
 
-        cb_gen_inv = QgsMapLayerComboBox()
-        cb_gen_inv.setFilters(QgsMapLayerProxyModel.RasterLayer)
-        cb_gen_inv.setAllowEmptyLayer(True)
-        cb_gen_si = QgsMapLayerComboBox()
-        cb_gen_si.setFilters(QgsMapLayerProxyModel.RasterLayer)
-        cb_gen_si.setAllowEmptyLayer(True)
-
-        cb_cm_inv = QgsMapLayerComboBox()
-        cb_cm_inv.setFilters(QgsMapLayerProxyModel.RasterLayer)
-        cb_cm_inv.setAllowEmptyLayer(True)
-        cb_cm_si = QgsMapLayerComboBox()
-        cb_cm_si.setFilters(QgsMapLayerProxyModel.RasterLayer)
-        cb_cm_si.setAllowEmptyLayer(True)
-
-        # New: Closest Point (0,1) widget pairs
-        cb_cp_inv = QgsMapLayerComboBox()
-        cb_cp_inv.setFilters(QgsMapLayerProxyModel.RasterLayer)
-        cb_cp_inv.setAllowEmptyLayer(True)
-        cb_cp_si = QgsMapLayerComboBox()
-        cb_cp_si.setFilters(QgsMapLayerProxyModel.RasterLayer)
-        cb_cp_si.setAllowEmptyLayer(True)
-
-        # New: F1-Score widget pairs
-        cb_f1_inv = QgsMapLayerComboBox()
-        cb_f1_inv.setFilters(QgsMapLayerProxyModel.RasterLayer)
-        cb_f1_inv.setAllowEmptyLayer(True)
-        cb_f1_si = QgsMapLayerComboBox()
-        cb_f1_si.setFilters(QgsMapLayerProxyModel.RasterLayer)
-        cb_f1_si.setAllowEmptyLayer(True)
-
-        # New: Threat Score (CSI) widget pairs
-        cb_ts_inv = QgsMapLayerComboBox()
-        cb_ts_inv.setFilters(QgsMapLayerProxyModel.RasterLayer)
-        cb_ts_inv.setAllowEmptyLayer(True)
-        cb_ts_si = QgsMapLayerComboBox()
-        cb_ts_si.setFilters(QgsMapLayerProxyModel.RasterLayer)
-        cb_ts_si.setAllowEmptyLayer(True)
-
-        pages_cfg = [
-            ("Classify by ROC", [
-                ("Landslide Inventory Raster", cb_roc_inv),
-                ("SI Raster", cb_roc_si),
+        def _classified_params():
+            return [
+                ("Landslide Inventory Raster", self._rl_combo()),
+                ("SI Raster", self._rl_combo()),
                 ("Number of Classes (from 2 to 10)", self._spinbox(2, 10, 5)),
                 ("Output Folder (Cutoffs & Raster)", _folder_widget(force_physical=True)),
-            ]),
-            ("Classify by Closest Point (0,1)", [
-                ("Landslide Inventory Raster", cb_cp_inv),
-                ("SI Raster", cb_cp_si),
-                ("Number of Classes (from 2 to 10)", self._spinbox(2, 10, 5)),
-                ("Output Folder (Cutoffs & Raster)", _folder_widget(force_physical=True)),
-            ]),
-            ("Classify by F1-Score", [
-                ("Landslide Inventory Raster", cb_f1_inv),
-                ("SI Raster", cb_f1_si),
-                ("Number of Classes (from 2 to 10)", self._spinbox(2, 10, 5)),
-                ("Output Folder (Cutoffs & Raster)", _folder_widget(force_physical=True)),
-            ]),
-            ("Classify by Threat Score (CSI)", [
-                ("Landslide Inventory Raster", cb_ts_inv),
-                ("SI Raster", cb_ts_si),
-                ("Number of Classes (from 2 to 10)", self._spinbox(2, 10, 5)),
-                ("Output Folder (Cutoffs & Raster)", _folder_widget(force_physical=True)),
-            ]),
-            ("ROC Generator", [
-                ("Landslide Inventory Raster", cb_gen_inv),
-                ("SI Raster", cb_gen_si),
+            ]
+
+        def _roc_generator_params():
+            return [
+                ("Landslide Inventory Raster", self._rl_combo()),
+                ("SI Raster", self._rl_combo()),
                 ("Output Folder", _folder_widget(force_physical=True)),
-            ]),
-            ("Confusion Matrix (FP/TN Threshold)", [
-                ("Landslide Inventory Raster", cb_cm_inv),
-                ("SI Raster", cb_cm_si),
+            ]
+
+        def _confusion_matrix_params():
+            return [
+                ("Landslide Inventory Raster", self._rl_combo()),
+                ("SI Raster", self._rl_combo()),
                 ("Cutoff percentile (0 = Youden)", self._spinbox(0, 100, 0)),
                 ("Output Folder (Metrics)", _folder_widget(force_physical=True)),
-            ]),
+            ]
+
+        pages_cfg = [
+            ("Classify by ROC", _classified_params),
+            ("Classify by Closest Point (0,1)", _classified_params),
+            ("Classify by F1-Score", _classified_params),
+            ("Classify by Threat Score (CSI)", _classified_params),
+            ("ROC Generator", _roc_generator_params),
+            ("Confusion Matrix (FP/TN Threshold)", _confusion_matrix_params),
         ]
 
-        stacked = self.stackedWidget_r
-        for i, (title, params) in enumerate(pages_cfg):
-            page, refs = _simple_page(title, params, f"RUN  —  {title}", "#c0392b")
-            self._cl_r_refs[title] = refs
-            stacked.insertWidget(i + 6, page)
-            refs['run_btn'].clicked.connect(
-                lambda checked=False, t=title: self._run_classify_raster(t))
+        # stackedWidget_r only declares the six algorithm pages in the .ui, so
+        # these need placeholders to occupy indices 6..11 until first shown.
+        for _ in pages_cfg:
+            self.stackedWidget_r.addWidget(QWidget())
+
+        for i, (title, params_fn) in enumerate(pages_cfg):
+            self._lazy_r[self.CL_R_PAGE_OFFSET + i] = (
+                lambda t=title, fn=params_fn: self._make_simple_page(
+                    t, fn(), self._cl_r_refs, self._run_classify_raster, "#c0392b"))
 
         # Rebuild the classify_list_r in the correct order.
         # The .ui file has 3 hardcoded items (ROC, ROC Generator, CM). 
@@ -1930,11 +2096,6 @@ class SzEduDialog(QDialog, FORM_CLASS):
 
 
 
-    def _build_classify_raster_tab2(self):
-        # NOTE: This second copy was originally a duplicate. Merged into single version above (_build_classify_raster_tab).
-        pass
-
-
     # ── Small widget factories ───────────────────────────────────────────────
 
     @staticmethod
@@ -1945,38 +2106,96 @@ class SzEduDialog(QDialog, FORM_CLASS):
         return cb
 
     @staticmethod
+    def _rl_combo():
+        cb = QgsMapLayerComboBox()
+        cb.setFilters(QgsMapLayerProxyModel.RasterLayer)
+        cb.setAllowEmptyLayer(True)
+        return cb
+
+    @staticmethod
     def _spinbox(min_v, max_v, default):
         sb = QSpinBox()
         sb.setRange(min_v, max_v)
         sb.setValue(default)
         return sb
 
+    @staticmethod
+    def _line_edit(placeholder):
+        le = QLineEdit()
+        le.setPlaceholderText(placeholder)
+        return le
+
+    @classmethod
+    def _layer_field_pair(cls, n_fields=1):
+        """A vector-layer combo plus `n_fields` field combos kept in sync with it."""
+        layer_combo = cls._vl_combo()
+        field_combos = []
+        for _ in range(n_fields):
+            fc = QgsFieldComboBox()
+            layer_combo.layerChanged.connect(fc.setLayer)
+            # The combo pre-selects a layer when the project already has one, so
+            # layerChanged never fires for it — seed the field list up front.
+            fc.setLayer(layer_combo.currentLayer())
+            field_combos.append(fc)
+        return (layer_combo, *field_combos)
+
+    @classmethod
+    def _layer_fields_pair(cls):
+        """A vector-layer combo plus a checkable multi-field combo bound to it."""
+        from qgis.PyQt import sip
+
+        layer_combo = cls._vl_combo()
+        fields_combo = QgsCheckableComboBox()
+        fields_combo.setDefaultText("Select the fields…")
+
+        def _populate(layer):
+            # During QGIS shutdown the project is cleared and every layer is
+            # removed, which makes the combo emit layerChanged while the C++
+            # widgets/layers are mid-teardown. Touching a deleted object here
+            # is an access violation (not a catchable Python exception), so bail
+            # out if anything we need has already been deleted.
+            if sip.isdeleted(fields_combo):
+                return
+            try:
+                valid = layer is not None and not sip.isdeleted(layer) and layer.isValid()
+            except (RuntimeError, AttributeError):
+                valid = False
+            fields_combo.clear()
+            if valid:
+                fields_combo.addItems([f.name() for f in layer.fields()])
+
+        layer_combo.layerChanged.connect(_populate)
+        # The combo pre-selects a layer when the project already has one, so
+        # layerChanged never fires for it — seed the field list up front.
+        _populate(layer_combo.currentLayer())
+        return layer_combo, fields_combo
+
     # ── RUN slots ────────────────────────────────────────────────────────────
 
     def _run_raster(self, key: str, mode: str):
         """Extract values and call backend."""
-        if hasattr(self, '_is_running') and self._is_running:
+        if self._is_running:
             return
-            
+
         m_refs = self._raster_refs[key][mode]
-        
+
         inv_layer = m_refs['inventory'].currentLayer()
         if not inv_layer or not inv_layer.isValid():
-            QMessageBox.warning(self, "Missing input", "Please select a valid Landslide Raster Inventory.")
+            self._warn("Please select a valid Landslide Raster Inventory.")
             return
         inventory = inv_layer.source()
-        
+
         covariates = m_refs['covariates']._paths()
         if not covariates:
-            QMessageBox.warning(self, "Missing input", "Please add at least one covariate raster.")
+            self._warn("Please add at least one covariate raster.")
             return
-        spin_val   = m_refs['spin'].value()
+        spin_val = m_refs['spin'].value()
 
         if m_refs['output']['fw'].is_temp:
-            QMessageBox.warning(self, "Missing output", "Please specify a file path for the Output Susceptibility Index Raster.")
+            self._warn("Please specify a file path for the Output Susceptibility Index Raster.")
             return
         if m_refs['folder'].is_temp:
-            QMessageBox.warning(self, "Missing output", "Please specify a directory path for the Additional Outputs Folder.")
+            self._warn("Please specify a directory path for the Additional Outputs Folder.")
             return
 
         if m_refs['out_test']['fw'].is_temp or not m_refs['out_test']['fw'].filePath():
@@ -1988,12 +2207,11 @@ class SzEduDialog(QDialog, FORM_CLASS):
         out_folder = self._get_out_path(m_refs['folder'], is_folder=True)
 
         if not out_folder:
-            QMessageBox.warning(self, "Missing input", "Please select an output folder.")
+            self._warn("Please select an output folder.")
             return
 
         algo_display = self.ALGO_NAMES[self.ALGO_KEYS_R.index(key)]
-        self._set_running(f"Running {algo_display} ({mode})...")
-        
+
         # Method tags for files
         METHOD_TAGS = {
             'woe': 'WoE',
@@ -2004,7 +2222,7 @@ class SzEduDialog(QDialog, FORM_CLASS):
             'dt':  'DT',
         }
         method_tag = METHOD_TAGS.get(key, key.upper())
-        
+
         def on_finished(_):
             is_raster_temp = m_refs['output']['fw'].is_temp
             # Auto-load SI
@@ -2018,10 +2236,11 @@ class SzEduDialog(QDialog, FORM_CLASS):
                     from qgis.core import QgsRasterLayer
                     lyr = QgsRasterLayer(out_raster, lyr_name)
                 if lyr and lyr.isValid():
+                    _style_si_raster(lyr)
                     QgsProject.instance().addMapLayer(lyr)
 
             is_folder_temp = m_refs['folder'].is_temp
-            
+
             # Load Test ROC CSV as geometryless memory layer if temporary
             if is_folder_temp:
                 import glob
@@ -2032,32 +2251,14 @@ class SzEduDialog(QDialog, FORM_CLASS):
                         QgsProject.instance().addMapLayer(csv_lyr)
 
             self._set_finished()
-            QMessageBox.information(self, "Done",
-                                    f"{algo_display} ({mode}) completed successfully.\n"
-                                    f"Results saved to:\n{out_folder}")
-                                    
-            # Show tabbed Charts Dialog
-            dlg = ChartsDialog(out_folder, algo_display, is_temp=is_folder_temp, parent=self)
-            dlg.exec_()
-            
-            if worker in self._workers:
-                self._workers.remove(worker)
+            self._set_results_folder(m_refs, out_folder)
+            self._info(f"{algo_display} ({mode}) completed. Results in {out_folder}")
+            self._show_charts(out_folder, algo_display, is_folder_temp)
 
-        def on_error(exc):
-            self._set_finished()
-            self.status_label.setText("Error during run")
-            self.progress_bar.setValue(0)
-            import traceback
-            QMessageBox.critical(self, "Error", f"{str(exc)}")
-            if worker in self._workers:
-                self._workers.remove(worker)
-
-        worker = WorkerThread(self._call_raster_backend, key, mode, inventory, covariates,
-                              spin_val, out_raster, out_test, out_folder)
-        worker.finished_ok.connect(on_finished)
-        worker.error.connect(on_error)
-        self._workers.append(worker)
-        worker.start()
+        self._start_task(f"{algo_display} ({mode})", self._call_raster_backend,
+                         key, mode, inventory, covariates, spin_val,
+                         out_raster, out_test, out_folder,
+                         on_success=on_finished)
 
     def _call_raster_backend(self, key, mode, inventory, covariates,
                               spin_val, out_raster, out_test, out_folder):
@@ -2145,35 +2346,33 @@ class SzEduDialog(QDialog, FORM_CLASS):
                            method_tag=method_tag, base_stats=out_data.get('base_stats'))
 
     def _run_vector(self, key: str, mode: str):
-        if hasattr(self, '_is_running') and self._is_running:
+        if self._is_running:
             return
-            
+
         refs   = self._vector_refs[key]
         m_refs = refs[mode]
         layer  = m_refs['layer_combo'].currentLayer()
 
         if not layer or not layer.isValid():
-            QMessageBox.warning(self, "Missing input",
-                "Please select a valid Slope Unit Vector layer.")
+            self._warn("Please select a valid Slope Unit Vector layer.")
             return
 
         dep_field = m_refs['dep_combo'].currentField()
         if not dep_field:
-            QMessageBox.warning(self, "Missing input",
-                "Please select a Dependent Variable field.")
+            self._warn("Please select a Dependent Variable field.")
             return
 
-        indep_fields = [m_refs['indep_list'].item(i).text()
-                        for i in range(m_refs['indep_list'].count())
-                        if m_refs['indep_list'].item(i).checkState() == Qt.Checked]
+        indep_fields = list(m_refs['indep_combo'].checkedItems())
         if not indep_fields:
-            QMessageBox.warning(self, "Missing input",
-                "Please check at least one Independent Variable field.")
+            self._warn("Please check at least one Independent Variable field.")
             return
+
+        # Percentage of test sample (binomial) or number of k-folds (kfold).
+        spin_val = m_refs['spin'].value()
 
         out_folder = self._get_out_path(m_refs['folder'], is_folder=True)
         if not out_folder:
-            QMessageBox.warning(self, "Missing input", "Please select an output folder.")
+            self._warn("Please select an output folder.")
             return
 
         out_test = self._get_out_path(m_refs['out_test'], suffix=".gpkg", prefix="Test_vector_")
@@ -2183,8 +2382,7 @@ class SzEduDialog(QDialog, FORM_CLASS):
             out_train = None
 
         algo_display = self.ALGO_NAMES[self.ALGO_KEYS_R.index(key)]
-        self._set_running(f"Running {algo_display} ({mode})...")
-        
+
         def on_finished(_):
             is_folder_temp = m_refs['folder'].is_temp
             
@@ -2197,11 +2395,13 @@ class SzEduDialog(QDialog, FORM_CLASS):
                 if not lyr.isValid():
                     lyr = QgsVectorLayer(test_path, f"{algo_display} Vector Test SI" if mode == "binomial" else f"{algo_display} Vector test/fit", "ogr")
                 if lyr.isValid():
+                    _style_si_vector(lyr)
                     QgsProject.instance().addMapLayer(lyr)
             elif is_test_temp:
                 if os.path.exists(out_test):
                     lyr = load_as_memory_layer(out_test, "test", f"{algo_display} Vector Test SI" if mode == "binomial" else f"{algo_display} Vector test/fit")
                     if lyr and lyr.isValid():
+                        _style_si_vector(lyr)
                         QgsProject.instance().addMapLayer(lyr)
                     try: os.remove(out_test)
                     except: pass
@@ -2220,11 +2420,13 @@ class SzEduDialog(QDialog, FORM_CLASS):
                     if not lyr.isValid():
                         lyr = QgsVectorLayer(train_path, f"{algo_display} Vector Train SI", "ogr")
                     if lyr.isValid():
+                        _style_si_vector(lyr)
                         QgsProject.instance().addMapLayer(lyr)
                 elif is_train_temp:
                     if os.path.exists(out_train):
                         lyr = load_as_memory_layer(out_train, "train", f"{algo_display} Vector Train SI")
                         if lyr and lyr.isValid():
+                            _style_si_vector(lyr)
                             QgsProject.instance().addMapLayer(lyr)
                         try: os.remove(out_train)
                         except: pass
@@ -2243,30 +2445,14 @@ class SzEduDialog(QDialog, FORM_CLASS):
                         QgsProject.instance().addMapLayer(csv_lyr)
 
             self._set_finished()
-            QMessageBox.information(self, "Done",
-                f"{algo_display} ({mode}) completed.\nResults in:\n{out_folder}")
-            
-            # Show tabbed Charts Dialog
-            dlg = ChartsDialog(out_folder, algo_display, is_temp=is_folder_temp, parent=self)
-            dlg.exec_()
-            
-            if worker in self._workers:
-                self._workers.remove(worker)
+            self._set_results_folder(m_refs, out_folder)
+            self._info(f"{algo_display} ({mode}) completed. Results in {out_folder}")
+            self._show_charts(out_folder, algo_display, is_folder_temp)
 
-        def on_error(exc):
-            self._set_finished()
-            self.status_label.setText("Error during run")
-            self.progress_bar.setValue(0)
-            import traceback
-            QMessageBox.critical(self, "Error", f"{str(exc)}")
-            if worker in self._workers:
-                self._workers.remove(worker)
-
-        worker = WorkerThread(self._call_vector_backend, key, mode, layer.source(), dep_field, indep_fields, spin_val, out_test, out_train, out_folder)
-        worker.finished_ok.connect(on_finished)
-        worker.error.connect(on_error)
-        self._workers.append(worker)
-        worker.start()
+        self._start_task(f"{algo_display} ({mode})", self._call_vector_backend,
+                         key, mode, layer.source(), dep_field, indep_fields,
+                         spin_val, out_test, out_train, out_folder,
+                         on_success=on_finished)
 
     def _call_vector_backend(self, key, mode, layer_path,
                               dep_field, indep_fields,
@@ -2383,20 +2569,47 @@ class SzEduDialog(QDialog, FORM_CLASS):
                 'OUT': out_folder
             })
 
+    def _auto_add_vector(self, path, name=None):
+        """Add a vector result written to disk into the current project."""
+        if not path or not os.path.exists(path):
+            return None
+        layer = QgsVectorLayer(path, name or os.path.splitext(os.path.basename(path))[0], "ogr")
+        if layer.isValid():
+            QgsProject.instance().addMapLayer(layer)
+            return layer
+        self._log(f"Could not load the result as a vector layer: {path}", Qgis.Warning)
+        return None
+
+    def _auto_add_raster(self, path, name=None):
+        """Add a raster result written to disk into the current project."""
+        from qgis.core import QgsRasterLayer
+        if not path or not os.path.exists(path):
+            return None
+        layer = QgsRasterLayer(path, name or os.path.splitext(os.path.basename(path))[0])
+        if layer.isValid():
+            QgsProject.instance().addMapLayer(layer)
+            return layer
+        self._log(f"Could not load the result as a raster layer: {path}", Qgis.Warning)
+        return None
+
     def _run_dataprep(self, title: str):
+        if self._is_running:
+            return
         refs = self._dp_refs[title]
+        result_dir = None   # where this tool's output landed, for the Open button
         try:
             if title == "Clean Points By Raster Kernel":
                 v_layer = refs["Input Points Layer (vector)"].currentLayer()
                 r_path  = refs["Raster Kernel Layer"].filePath()
-                ext_str = refs["Extent Coordinates (xmin,xmax,ymin,ymax)"].text()
+                extent  = _extent_values(refs["Extent"])
                 buf     = refs["Buffer Radius (pixels)"].value()
                 min_val = refs["Min Value Acceptable"].value()
 
                 out_shp = self._get_out_path(refs["Output Vector Layer"], suffix=".shp", prefix="Clean_points_")
+                result_dir = out_shp
 
                 if not (v_layer and r_path and out_shp):
-                    QMessageBox.warning(self, "Missing input", "Ensure points, raster, and output are set.")
+                    self._warn("Ensure points, raster, and output are set.")
                     return
                 self._set_running(f"Running {title}...")
                 from ..scripts.cleaning import cleankernelAlgorithm
@@ -2408,8 +2621,8 @@ class SzEduDialog(QDialog, FORM_CLASS):
                     'radius': buf,
                     'OUT': out_shp
                 }
-                if ext_str:
-                    params['exst'] = [float(x.strip()) for x in ext_str.split(',')]
+                if extent:
+                    params['exst'] = extent
                 algo_mod.processAlgorithm_edu(params)
                 if refs["Output Vector Layer"]["fw"].is_temp:
                     lyr = load_as_memory_layer(out_shp, "clean", "Cleaned Points")
@@ -2430,9 +2643,10 @@ class SzEduDialog(QDialog, FORM_CLASS):
 
                 out_csv = self._get_out_path(refs["Output CSV"], suffix=".csv", prefix="Attr_stats_")
                 out_folder = self._get_out_path(refs["Output Folder"], is_folder=True)
-                
+                result_dir = out_folder
+
                 if not (v_layer and id_field and out_csv and out_folder):
-                    QMessageBox.warning(self, "Missing input", "All fields required.")
+                    self._warn("All fields required.")
                     return
                 self._set_running(f"Running {title}...")
                 from ..scripts.lsdanalysis import statistic
@@ -2453,9 +2667,10 @@ class SzEduDialog(QDialog, FORM_CLASS):
                 buf     = refs["Buffer Radius (pixels)"].value()
 
                 out_shp = self._get_out_path(refs["Output Vector Layer"], suffix=".shp", prefix="Kernel_stats_")
+                result_dir = out_shp
 
                 if not (v_layer and r_path and m_layer and out_shp):
-                    QMessageBox.warning(self, "Missing input", "Please provide all required inputs.")
+                    self._warn("Please provide all required inputs.")
                     return
                 self._set_running(f"Running {title}...")
                 from ..scripts.stat31 import rasterstatkernelAlgorithm
@@ -2483,8 +2698,9 @@ class SzEduDialog(QDialog, FORM_CLASS):
                 layer = refs["Input Points Layer (vector)"].currentLayer()
                 field = refs["ID Field"].currentField()
                 out_folder = self._get_out_path(refs["Output Folder"], is_folder=True)
+                result_dir = out_folder
                 if not layer or not field or not out_folder:
-                    QMessageBox.warning(self, "Missing input", "Please provide all parameters.")
+                    self._warn("Please provide all parameters.")
                     return
                 self._set_running(f"Running {title}...")
                 from ..scripts.graphs_lsdstats_kernel import statistickernel
@@ -2501,9 +2717,10 @@ class SzEduDialog(QDialog, FORM_CLASS):
 
                 out1 = self._get_out_path(refs["Output Layer Sample"], suffix=".shp", prefix="Sample_")
                 out2 = self._get_out_path(refs["Output Layer 1-Sample"], suffix=".shp", prefix="1_Sample_")
+                result_dir = out1
 
                 if not (v_pts and out1 and out2):
-                    QMessageBox.warning(self, "Missing input", "Points layer and both outputs required.")
+                    self._warn("Points layer and both outputs required.")
                     return
                 self._set_running(f"Running {title}...")
                 from ..scripts.randomsampler3 import samplerAlgorithm
@@ -2541,16 +2758,19 @@ class SzEduDialog(QDialog, FORM_CLASS):
             elif title == "Points To Grid":
                 v_layer = refs["Input Points Layer (vector)"].currentLayer()
                 r_path  = refs["Reference Raster"].filePath()
-                ext_str = refs["Extent Coordinates (xmin,xmax,ymin,ymax)"].text()
+                coords  = _extent_values(refs["Extent"])
 
                 out_tif = self._get_out_path(refs["Output Raster"], suffix=".tif", prefix="Pts_to_grid_")
+                result_dir = out_tif
 
                 if not (v_layer and r_path and out_tif):
-                    QMessageBox.warning(self, "Missing input", "Layer, Reference raster, output required.")
+                    self._warn("Layer, Reference raster, output required.")
+                    return
+                if not coords:
+                    self._warn("Please define the output extent.")
                     return
                 self._set_running(f"Running {title}...")
                 from qgis.core import QgsRectangle
-                coords = [float(x.strip()) for x in ext_str.split(',')]
                 from ..scripts.pointtogrid import pointtogridAlgorithm
                 alg = pointtogridAlgorithm()
                 alg.f = __import__('tempfile').gettempdir()
@@ -2566,9 +2786,10 @@ class SzEduDialog(QDialog, FORM_CLASS):
                 ph      = refs["Pixel Height"].value()
 
                 out_tif = self._get_out_path(refs["Output Raster"], suffix=".tif", prefix="Poly_to_grid_")
+                result_dir = out_tif
 
                 if not (v_layer and out_tif):
-                    QMessageBox.warning(self, "Missing input", "Polygon layer and output required.")
+                    self._warn("Polygon layer and output required.")
                     return
                 self._set_running(f"Running {title}...")
                 from ..scripts.polytogrid import polytogridAlgorithm
@@ -2584,7 +2805,7 @@ class SzEduDialog(QDialog, FORM_CLASS):
                 field = refs["Field to Classify"].currentField()
                 new_f = refs["New Field Name"].text()
                 if not layer or not txt or not field or not new_f:
-                    QMessageBox.warning(self, "Missing input", "Please provide all parameters.")
+                    self._warn("Please provide all parameters.")
                     return
                 self._set_running(f"Running {title}...")
                 from ..scripts.classcovtxt import classcovtxtAlgorithm
@@ -2598,7 +2819,7 @@ class SzEduDialog(QDialog, FORM_CLASS):
                 new_f = refs["New Field Name"].text()
                 num = refs["Number of Quantiles (4=quartiles, 10=deciles)"].value()
                 if not layer or not field or not new_f:
-                    QMessageBox.warning(self, "Missing input", "Please provide all parameters.")
+                    self._warn("Please provide all parameters.")
                     return
                 self._set_running(f"Running {title}...")
                 from ..scripts.classcovdeciles import classcovdecAlgorithm
@@ -2608,12 +2829,11 @@ class SzEduDialog(QDialog, FORM_CLASS):
 
             elif title == "Correlation Plot":
                 layer = refs["Input Layer (vector)"].currentLayer()
-                lw = refs["Continuous Independent Variables"]
-                from qgis.PyQt.QtCore import Qt
-                fields = [lw.item(i).text() for i in range(lw.count()) if lw.item(i).checkState() == Qt.Checked]
+                fields = list(refs["Continuous Independent Variables"].checkedItems())
                 out = self._get_out_path(refs["Output Folder"], is_folder=True)
+                result_dir = out
                 if not layer or not fields or not out:
-                    QMessageBox.warning(self, "Missing input", "Please provide all parameters.")
+                    self._warn("Please provide all parameters.")
                     return
                 self._set_running(f"Running {title}...")
                 from ..scripts.corrplot import CorrAlgorithm
@@ -2625,34 +2845,37 @@ class SzEduDialog(QDialog, FORM_CLASS):
                 alg.corr(alg_params2)
 
             self._set_finished()
-            QMessageBox.information(self, "Success", f"{title} completed successfully.")
+            if result_dir:
+                self._set_results_folder(refs, result_dir)
+            self._info(f"{title} completed successfully.")
         except Exception as e:
-            self.status_label.setText("Error during run")
-            self.progress_bar.setRange(0, 100)
-            self.progress_bar.setValue(0)
             import traceback
-            QMessageBox.critical(self, "Error", f"{str(e)}\\n{traceback.format_exc()}")
+            # The panel must never stay locked because a step raised.
+            self._set_finished(status="Error during run", progress=0)
+            self._log(traceback.format_exc(), Qgis.Critical)
+            self._error(f"{title} failed: {e}. "
+                        "See the SZR+ tab of the Log Messages panel for details.")
 
     def _run_classify(self, title: str):
         refs = self._cl_refs[title]
         layer = refs["Input Layer (vector)"].currentLayer()
 
         if not layer or not layer.isValid():
-            QMessageBox.warning(self, "Missing input", "Please select a valid Input Layer.")
+            self._warn("Please select a valid Input Layer.")
             return
 
         si_field = refs["SI Field"].currentField()
         dep_field = refs["Dependent Variable Field"].currentField()
 
         if not si_field or not dep_field:
-            QMessageBox.warning(self, "Missing input", "Please select both SI and Dependent Variable Fields.")
+            self._warn("Please select both SI and Dependent Variable Fields.")
             return
 
         try:
             if title == "Classify Vector by ROC":
                 out_folder = self._get_out_path(refs["Output Folder"], is_folder=True)
                 if not out_folder:
-                    QMessageBox.warning(self, "Missing input", "Please specify an Output Folder.")
+                    self._warn("Please specify an Output Folder.")
                     return
                 self._set_running(f"Running {title}...")
                 from ..scripts.classvector import classvAlgorithm
@@ -2666,7 +2889,7 @@ class SzEduDialog(QDialog, FORM_CLASS):
                 df, crs = alg.load(alg_params)
                 alg.classy({
                     'df': df,
-                    'NUMBER': refs["Number of Classes"].value(),
+                    'NUMBER': refs["Number of Classes (from 2 to 10)"].value(),
                     'OUTPUT': out_folder
                 })
                 
@@ -2680,16 +2903,17 @@ class SzEduDialog(QDialog, FORM_CLASS):
                             QgsProject.instance().addMapLayer(csv_lyr)
                             
                 self._set_finished()
-                QMessageBox.information(self, "Success", f"Classify Vector by ROC completed.\\nSaved to:\\n{out_folder}")
+                self._set_results_folder(refs, out_folder)
+                self._info(f"Classify Vector by ROC completed. Saved to {out_folder}")
                 
             elif title == "Classify Vector by Weighted ROC":
                 w_field = refs["Weight Field"].currentField()
                 if not w_field:
-                    QMessageBox.warning(self, "Missing input", "Please select a Weight Field.")
+                    self._warn("Please select a Weight Field.")
                     return
                 out_folder = self._get_out_path(refs["Output Folder"], is_folder=True)
                 if not out_folder:
-                    QMessageBox.warning(self, "Missing input", "Please specify an Output Folder.")
+                    self._warn("Please specify an Output Folder.")
                     return
                 self._set_running(f"Running {title}...")
                 from ..scripts.classvectorw import classvAlgorithmW
@@ -2704,7 +2928,7 @@ class SzEduDialog(QDialog, FORM_CLASS):
                 df, crs = alg.load(alg_params)
                 alg.classy({
                     'df': df,
-                    'NUMBER': refs["Number of Classes"].value(),
+                    'NUMBER': refs["Number of Classes (from 2 to 10)"].value(),
                     'OUTPUT': out_folder
                 })
                 
@@ -2718,12 +2942,13 @@ class SzEduDialog(QDialog, FORM_CLASS):
                             QgsProject.instance().addMapLayer(csv_lyr)
                             
                 self._set_finished()
-                QMessageBox.information(self, "Success", f"Classify Vector by Weighted ROC completed.\\nSaved to:\\n{out_folder}")
+                self._set_results_folder(refs, out_folder)
+                self._info(f"Classify Vector by Weighted ROC completed. Saved to {out_folder}")
 
             elif title == "ROC Generator":
                 out_folder = self._get_out_path(refs["Output Folder"], is_folder=True)
                 if not out_folder:
-                    QMessageBox.warning(self, "Missing input", "Please specify an Output Folder.")
+                    self._warn("Please specify an Output Folder.")
                     return
                 self._set_running(f"Running {title}...")
                 from ..scripts.selfroc import rocGenerator
@@ -2740,18 +2965,16 @@ class SzEduDialog(QDialog, FORM_CLASS):
                     'OUT': out_folder
                 })
                 self._set_finished()
-                QMessageBox.information(self, "Success", f"ROC Generator completed.\nSaved to:\n{out_folder}")
-                
-                is_folder_temp = refs["Output Folder"].is_temp
-                if is_folder_temp:
-                    dlg = ChartsDialog(out_folder, "ROC Generator", is_temp=True, parent=self)
-                    dlg.exec_()
+                self._set_results_folder(refs, out_folder)
+                self._info(f"ROC Generator completed. Saved to {out_folder}")
+                self._show_charts(out_folder, "ROC Generator",
+                                  refs["Output Folder"].is_temp)
 
             elif title == "Confusion Matrix (FP/TN Threshold)":
                 out_gpkg = self._get_out_path(refs["Output GeoPackage"], suffix=".gpkg", prefix="Conf_matrix_")
 
                 if not out_gpkg:
-                    QMessageBox.warning(self, "Missing input", "Please specify an Output GeoPackage.")
+                    self._warn("Please specify an Output GeoPackage.")
                     return
                 self._set_running(f"Running {title}...")
                 from ..scripts.tptn import FPAlgorithm
@@ -2786,70 +3009,51 @@ class SzEduDialog(QDialog, FORM_CLASS):
                             QgsProject.instance().addMapLayer(v_lyr)
 
                 self._set_finished()
-                QMessageBox.information(self, "Success", f"Confusion Matrix calculated.\nSaved to:\n{out_gpkg}")
+                self._set_results_folder(refs, out_gpkg)
+                self._info(f"Confusion Matrix calculated. Saved to {out_gpkg}")
 
         except Exception as e:
-            self.status_label.setText("Error during run")
-            self.progress_bar.setRange(0, 100)
-            self.progress_bar.setValue(0)
             import traceback
-            QMessageBox.critical(self, "Error", f"{str(e)}\\n{traceback.format_exc()}")
+            # The panel must never stay locked because a step raised.
+            self._set_finished(status="Error during run", progress=0)
+            self._log(traceback.format_exc(), Qgis.Critical)
+            self._error(f"{title} failed: {e}. "
+                        "See the SZR+ tab of the Log Messages panel for details.")
 
     def _run_classify_raster(self, algo_name: str):
-        if hasattr(self, '_is_running') and self._is_running:
+        if self._is_running:
             return
 
         refs = self._cl_r_refs[algo_name]
-        
-        inv_layer = None
-        si_layer = None
+
+        inv_layer = refs["Landslide Inventory Raster"].currentLayer()
+        si_layer  = refs["SI Raster"].currentLayer()
         num_classes = None
         cutoff = None
-        out_folder = None
-        
-        if algo_name == "Classify by ROC":
-            inv_layer = refs["Landslide Inventory Raster"].currentLayer()
-            si_layer = refs["SI Raster"].currentLayer()
-            num_classes = refs["Number of Classes (from 2 to 10)"].value()
-            out_folder = self._get_out_path(refs["Output Folder (Cutoffs & Raster)"], is_folder=True)
-        elif algo_name == "ROC Generator":
-            inv_layer = refs["Landslide Inventory Raster"].currentLayer()
-            si_layer = refs["SI Raster"].currentLayer()
-            out_folder = self._get_out_path(refs["Output Folder"], is_folder=True)
-        elif algo_name == "Confusion Matrix (FP/TN Threshold)":
-            inv_layer = refs["Landslide Inventory Raster"].currentLayer()
-            si_layer = refs["SI Raster"].currentLayer()
-            cutoff = refs["Cutoff percentile (0 = Youden)"].value()
-            out_folder = self._get_out_path(refs["Output Folder (Metrics)"], is_folder=True)
-        elif algo_name in ("Classify by Closest Point (0,1)", "Classify by F1-Score", "Classify by Threat Score (CSI)"):
-            inv_layer = refs["Landslide Inventory Raster"].currentLayer()
-            si_layer = refs["SI Raster"].currentLayer()
-            num_classes = refs["Number of Classes (from 2 to 10)"].value()
-            out_folder = self._get_out_path(refs["Output Folder (Cutoffs & Raster)"], is_folder=True)
 
-            
-        if not inv_layer or not si_layer:
-            QMessageBox.warning(self, "Missing input", "Please select both Inventory and SI Rasters.")
-            return
-            
-        if not out_folder:
-            QMessageBox.warning(self, "Missing output", "Please select an output folder.")
-            return
-
-        if algo_name == "Classify by ROC":
-            folder_widget = refs["Output Folder (Cutoffs & Raster)"]
-        elif algo_name == "ROC Generator":
+        if algo_name == "ROC Generator":
             folder_widget = refs["Output Folder"]
         elif algo_name == "Confusion Matrix (FP/TN Threshold)":
             folder_widget = refs["Output Folder (Metrics)"]
+            cutoff = refs["Cutoff percentile (0 = Youden)"].value()
         else:
             folder_widget = refs["Output Folder (Cutoffs & Raster)"]
-        is_folder_temp = folder_widget.is_temp
-        if is_folder_temp:
-            QMessageBox.warning(self, "Missing output", "Please specify a directory path for the Output Folder.")
+            num_classes = refs["Number of Classes (from 2 to 10)"].value()
+
+        out_folder = self._get_out_path(folder_widget, is_folder=True)
+
+        if not inv_layer or not si_layer:
+            self._warn("Please select both Inventory and SI Rasters.")
             return
 
-        self._set_running(f"Running {algo_name} ...")
+        if not out_folder:
+            self._warn("Please select an output folder.")
+            return
+
+        is_folder_temp = folder_widget.is_temp
+        if is_folder_temp:
+            self._warn("Please specify a directory path for the Output Folder.")
+            return
 
         # Capture plain strings only – NO QGIS layer objects inside the thread closure.
         si_path  = si_layer.source()
@@ -2863,7 +3067,7 @@ class SzEduDialog(QDialog, FORM_CLASS):
 
         def _call_classify_raster():
             """
-            Pure computation in the WorkerThread.
+            Pure computation, run on the task manager's worker thread.
             Returns a plain dict – NEVER creates QgsRasterLayer or calls QgsProject.
             """
             from osgeo import gdal
@@ -3107,12 +3311,9 @@ class SzEduDialog(QDialog, FORM_CLASS):
                 ds_inv = None
                 ds_out = None
 
-        worker = WorkerThread(_call_classify_raster)
-        self._workers.append(worker)
         # _on_classify_raster_done runs on the main thread via Qt signal/slot.
-        worker.finished_ok.connect(self._on_classify_raster_done)
-        worker.error.connect(lambda msg: (self._set_finished(), QMessageBox.critical(self, "Error", str(msg))))
-        worker.start()
+        self._start_task(algo_name, _call_classify_raster,
+                         on_success=self._on_classify_raster_done)
 
     def _on_classify_raster_done(self, result):
         """
@@ -3130,6 +3331,9 @@ class SzEduDialog(QDialog, FORM_CLASS):
         out_folder = result.get('out_folder')
         algo_name = result.get('algo_name')
         method_label = result.get('method_label')
+
+        if algo_name and out_folder:
+            self._set_results_folder(self._cl_r_refs.get(algo_name, {}), out_folder)
 
         # Load cutoffs/metrics CSV if temporary
         if is_temp and out_folder:
@@ -3156,11 +3360,7 @@ class SzEduDialog(QDialog, FORM_CLASS):
                 if csv_lyr and csv_lyr.isValid():
                     QgsProject.instance().addMapLayer(csv_lyr)
 
-            # Show tabbed Charts Dialog if there are PNGs
-            import glob
-            if glob.glob(os.path.join(out_folder, "*.png")):
-                dlg = ChartsDialog(out_folder, algo_name or "Classify Raster", is_temp=True, parent=self)
-                dlg.exec_()
+            self._show_charts(out_folder, algo_name or "Classify Raster", True)
 
         out_tif = result.get('out_tif')
         if not out_tif:
@@ -3171,8 +3371,6 @@ class SzEduDialog(QDialog, FORM_CLASS):
         layer_name  = result.get('layer_name', "Reclassified SI")
 
         from qgis.core import QgsRasterLayer, QgsProject, QgsPalettedRasterRenderer
-        from qgis.PyQt.QtGui import QColor
-        import matplotlib.cm as cm
 
         if is_temp:
             rlayer = self.load_raster_as_memory_layer(out_tif, layer_name)
@@ -3182,15 +3380,12 @@ class SzEduDialog(QDialog, FORM_CLASS):
             rlayer = QgsRasterLayer(out_tif, layer_name)
 
         if not rlayer or not rlayer.isValid():
-            QMessageBox.warning(self, "Layer error",
-                                f"The reclassified raster could not be loaded:\n{out_tif}")
+            self._error(f"The reclassified raster could not be loaded: {out_tif}",
+                        title="Layer error")
             return
 
         # Build colour palette (main thread – safe to use Qt colour types here)
-        try:
-            cmap = cm.get_cmap('RdYlGn_r')
-        except Exception:
-            cmap = cm.get_cmap('RdYlGn')
+        cmap = _colormap('RdYlGn_r')
 
         if num_classes == 2:
             class_names = {1: "Low", 2: "High"}
@@ -3214,30 +3409,3 @@ class SzEduDialog(QDialog, FORM_CLASS):
         QgsProject.instance().addMapLayer(rlayer)
         rlayer.triggerRepaint()
 
-    def _show_latest_roc_plot(self, folder, algo_name):
-        """Find the latest modified .png in the folder and display it in a popup."""
-        import glob
-        pngs = glob.glob(os.path.join(folder, "*.png"))
-        if not pngs:
-            return
-            
-        latest_png = max(pngs, key=os.path.getmtime)
-        
-        dlg = QDialog(self)
-        dlg.setWindowTitle(f"ROC Plot - {algo_name}")
-        vbox = QVBoxLayout(dlg)
-        
-        lbl = QLabel()
-        from qgis.PyQt.QtGui import QPixmap
-        pix = QPixmap(latest_png)
-        if pix.width() > 800 or pix.height() > 800:
-            pix = pix.scaled(800, 800, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        lbl.setPixmap(pix)
-        lbl.setAlignment(Qt.AlignCenter)
-        vbox.addWidget(lbl)
-        
-        btn = QPushButton("Close")
-        btn.clicked.connect(dlg.accept)
-        vbox.addWidget(btn)
-        
-        dlg.exec_()

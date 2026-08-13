@@ -1,7 +1,6 @@
+import importlib
+import importlib.util
 import os
-import sys
-import os
-from qgis.core import Qgis
 import sys
 sys.setrecursionlimit(10000)
 from qgis.core import *
@@ -25,6 +24,14 @@ from .utils import (
 
 
 class installer():
+    # pip name -> import name, for the packages listed in requirements.txt.
+    REQUIRED_MODULES = {
+        "scikit-learn": "sklearn",
+        "libpysal": "libpysal",
+        "seaborn": "seaborn",
+        "geopandas": "geopandas",
+    }
+
     def __init__(self,version):
         self.plugin_module = os.path.basename(os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir)))
         self.plugin_venv = "."+self.plugin_module+version.replace('.', '')
@@ -39,25 +46,39 @@ class installer():
         )
         self.qgis_python_interpreter = locate_py()
         self.venv_path = os.path.join(self.prefix_path,self.plugin_venv)
+        self.site_packages_path = None
+        self.bin_path = None
 
-        # if platform.system() == 'Windows':
-        #     self.site_packages_path = os.path.join(self.prefix_path,self.plugin_venv,"Lib", "site-packages")
-        #     self.bin_path = os.path.join(self.prefix_path,self.plugin_venv,"Scripts")
-        # else:
-        #     search_pattern = os.path.join(self.prefix_path,self.plugin_venv, "lib", "python*", "site-packages")
-        #     self.site_packages_path = glob.glob(search_pattern)[0]
-        #     self.bin_path = os.path.join(self.prefix_path,self.plugin_venv,"bin")
+    def activate_env(self):
+        """Fast path for an environment that has already been provisioned.
 
-        # if self.site_packages_path not in sys.path:
-        #     log(f"Adding {self.site_packages_path} to PYTHONPATH")
-        #     sys.path.insert(0, self.site_packages_path)
-        #     os.environ["PYTHONPATH"] = (
-        #         self.site_packages_path + ";" + os.environ.get("PYTHONPATH", "")
-        #     )
+        Only puts the existing virtual-environment on sys.path/PATH and checks
+        that every requirement is importable. Unlike preliminay_req() +
+        requirements() this spawns no subprocess, so QGIS start-up costs a few
+        milliseconds instead of several seconds. Returns False when anything is
+        missing, so the caller can fall back to the full installation path.
+        """
+        if not os.path.isdir(self.venv_path):
+            return False
+        try:
+            self.site_packages_path, self.bin_path = add_QGIS_env(
+                self.prefix_path, self.plugin_venv)
+        except Exception as e:
+            log(f"Could not activate the existing environment: {e}")
+            return False
 
-        # if self.bin_path not in os.environ["PATH"]:
-        #     log(f"Adding {self.bin_path} to PATH")
-        #     os.environ["PATH"] = self.bin_path + ";" + os.environ["PATH"]    
+        # sys.path was just modified, so the import machinery must re-scan it.
+        importlib.invalidate_caches()
+        for module in self.REQUIRED_MODULES.values():
+            try:
+                found = importlib.util.find_spec(module) is not None
+            except (ImportError, ValueError):
+                found = False
+            if not found:
+                log(f"'{module}' is missing from {self.venv_path}; "
+                    "running the full dependency check.")
+                return False
+        return True
 
     def preliminay_req(self):
         try:
@@ -132,9 +153,9 @@ class installer():
                     except Exception as e:
                         QgsMessageLog.logMessage(traceback.format_exc(), level=Qgis.Warning)
                         QMessageBox.information(None, "An error occurred",
-                                                "SZ couldn't install Python packages!\n"
+                                                "SZR+ couldn't install Python packages!\n"
                                                 "See 'General' tab in 'Log Messages' panel for details.\n"
-                                                "Report any errors to https://github.com/SZtools/SZ/issues")
+                                                "Report any errors to https://github.com/PadiCR/SZRPlus/issues")
                         log(f"An error occurred:{e}")
                         return False
                 else:
@@ -144,43 +165,11 @@ class installer():
                     return False
                 
                 sys.path_importer_cache.clear()
-                # log_file = os.path.join(tempfile.gettempdir(), "SZ-logs.txt")
-                # # Add the current date and time to the log file
-                # current_datetime = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                # log_entry = f"\nLog created on: {current_datetime}\n"
-
-                # if os.path.exists(log_file):
-                #     # If the log file already exists, open it in append mode
-                #     with open(log_file, 'a') as log:
-                #         log.write(log_entry)
-                # else:
-                #     # If the log file doesn't exist, create it and write the log entry
-                #     with open(log_file, 'w') as log:
-                #         log.write(log_entry)
-                # try:
-                #     with open(log_file, 'a') as log:
-                #         # Create a temporary log file
-                #         subprocess.check_call(command, stderr=log, stdout=log)    
-                #         iface.messageBar().pushMessage("SZ:", 'Dependencies installed successfully!', Qgis.Success)
-                # except subprocess.CalledProcessError:
-                #     # Read the error message from the temporary log file
-                #     with open(log_file, 'r') as log:
-                #         error_message = log.read()
-
-                #     log_link = f'{log_file}'
-
-                #     # Construct the error message with the log file link
-                #     error_message = f'Error occurred while installing dependencies. \n{error_message} \nread {log_link} for details.'
-                #     iface.messageBar().pushMessage("SZ Log:", error_message, Qgis.Critical)
-                #     #sys.exit('Error occurred while installing dependencies. Check the log for details.')
-                #     sys.exit(error_message)
-
-                # # Remove the temporary log file
-                # os.remove(log_file)
+                importlib.invalidate_caches()
 
     def unload(self):
             # Remove path alterations
-            if self.site_packages_path in sys.path:
+            if self.site_packages_path and self.site_packages_path in sys.path:
                 sys.path.remove(self.site_packages_path)
                 os.environ["PYTHONPATH"] = os.environ["PYTHONPATH"].replace(
                     self.bin_path + os.pathsep, ""

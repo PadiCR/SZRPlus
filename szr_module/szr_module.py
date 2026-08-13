@@ -39,10 +39,10 @@ import os
 import sys
 import inspect
 from qgis.core import QgsApplication
-from qgis.PyQt.QtCore import QSettings
+from qgis.PyQt.QtCore import QSettings, Qt
 from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtWidgets import QAction
-from qgis.utils import iface, available_plugins, active_plugins
+from qgis.utils import iface
 from .installer.installer import installer
 from .utils import log, warn
 
@@ -55,10 +55,8 @@ if cmd_folder not in sys.path:
 class classePlugin(object):
 
     def __init__(self):
-        #self.settings = QgsSettings()
-        #self.settings.beginGroup("SZ")
-
         self.provider = None
+        self.dock = None
         dir=(os.path.dirname(os.path.abspath(__file__)))
         with open(dir+'/metadata.txt','r') as file:
             for line in file:
@@ -73,56 +71,185 @@ class classePlugin(object):
         QgsApplication.processingRegistry().addProvider(self.provider)
 
     def initGui(self):
-        self.installer=installer(self.version)
-        print('Plugin already installed? ',self.plugin_settings.value("installed"))
-        #if not self.plugin_settings.value("installed"):# or self.plugin_settings.value("active"):
-        print('0')
-        if self.installer.preliminay_req() is False:
-            self.installer.unload()
-            log(f"An error occured during the installation")
-            raise RuntimeError("An error occured during the installation")
-        else:
-            print('1')
-            if self.installer.requirements() is False:
-                self.installer.unload()
-                log(f"An error occured during the installation")
-                raise RuntimeError("An error occured during the installation")
-            else:
-                print('2')
-                self.plugin_settings.setValue("installed", True)
-                self.initProcessing()
-                # ── Educational GUI entry point ──────────────────────────────
-                self.edu_action = QAction(
-                    QIcon(os.path.join(cmd_folder, 'icon.svg')),
-                    'SZR+ (Susceptibility Zoning + Raster capabilities)',
-                    iface.mainWindow()
-                )
-                self.edu_action.triggered.connect(self._open_edu_dialog)
-                iface.addPluginToMenu('SZR+', self.edu_action)
-                iface.addToolBarIcon(self.edu_action)
-        # if self.plugin_settings.value("installed"):
-        #     print('3')
-        #     self.initProcessing()
+        self.installer = installer(self.version)
 
-    def _open_edu_dialog(self):
-        """Open the standalone SZR+ dialog."""
-        # Import here to avoid loading Qt widgets before QGIS is ready
-        from .New_GUI.sz_edu_dialog import SzEduDialog
-        
-        # Persist the instance so it floats and stays open
-        if getattr(self, 'edu_dlg', None) is None:
-            self.edu_dlg = SzEduDialog(iface.mainWindow())
-        self.edu_dlg.show()
+        if not self._ensure_dependencies():
+            self.installer.unload()
+            log("An error occured during the installation")
+            raise RuntimeError("An error occured during the installation")
+
+        self.plugin_settings.setValue("installed", True)
+        self.initProcessing()
+
+        # ── GUI entry point ──────────────────────────────────────────────────
+        self.edu_action = QAction(
+            QIcon(os.path.join(cmd_folder, 'icon.svg')),
+            'SZR+ (Susceptibility Zoning + Raster capabilities)',
+            iface.mainWindow()
+        )
+        self.edu_action.triggered.connect(self._open_panel)
+        iface.addPluginToMenu('SZR+', self.edu_action)
+        iface.addToolBarIcon(self.edu_action)
+
+    def _ensure_dependencies(self):
+        """Make the plugin's virtual-environment importable, provisioning it if needed.
+
+        Once an environment has been provisioned it is activated in-process,
+        which costs no subprocess call. The slow path (creating the venv, running
+        ensurepip and querying pip for every requirement) therefore only runs on
+        the first start, or when a dependency has gone missing.
+        """
+        if (self.plugin_settings.value("installed", False, type=bool)
+                and self.installer.activate_env()):
+            return True
+
+        if self.installer.preliminay_req() is False:
+            return False
+        if self.installer.requirements() is False:
+            return False
+        return True
+
+    DEFAULT_PANEL_SIZE = (1150, 720)
+
+    def _open_panel(self):
+        """Show the SZR+ panel, creating it on first use."""
+        if self.dock is None:
+            # Imported here so Qt widgets are only built once QGIS is ready.
+            from qgis.gui import QgsDockWidget
+            from .New_GUI.sz_edu_dialog import SzEduPanel
+
+            self.dock = QgsDockWidget(
+                'SZR+ (Susceptibility Zoning + Raster capabilities)',
+                iface.mainWindow())
+            self.dock.setObjectName('SZRPlusPanel')
+            self.dock.setWidget(SzEduPanel(self.dock))
+            iface.addDockWidget(Qt.RightDockWidgetArea, self.dock)
+            self.dock.closed.connect(self._save_panel_state)
+            self._restore_panel_state()
+
+        self.dock.setUserVisible(True)
+        # Re-check after showing: a floating dock can be repositioned by the
+        # window manager as it is mapped, and the monitor layout may have
+        # changed since the position was saved.
+        if self.dock.isFloating():
+            self._move_onto_screen()
+
+    def _screen_for_main_window(self):
+        """The screen QGIS is currently on (not necessarily the primary one)."""
+        from qgis.PyQt.QtWidgets import QApplication
+        main = iface.mainWindow()
+        if main is not None:
+            handle = main.windowHandle()
+            if handle is not None and handle.screen() is not None:
+                return handle.screen()
+            screen = QApplication.screenAt(main.frameGeometry().center())
+            if screen is not None:
+                return screen
+        return QApplication.primaryScreen()
+
+    def _move_onto_screen(self):
+        """Keep the floating panel fully inside a visible screen.
+
+        A floating QDockWidget is a top-level window with no automatic placement,
+        so without this it can open beyond the edge of a secondary monitor (or on
+        a monitor that is no longer attached).
+
+        Note resize() sets the *inner* size while move() positions the *frame*,
+        so the window-manager decorations have to be budgeted separately —
+        feeding frame dimensions into resize() makes the window grow each call.
+        """
+        if self.dock is None or not self.dock.isFloating():
+            return
+
+        avail = self._screen_for_main_window().availableGeometry()
+        frame = self.dock.frameGeometry()
+        inner = self.dock.geometry()
+        dw = max(0, frame.width() - inner.width())
+        dh = max(0, frame.height() - inner.height())
+
+        new_w = min(inner.width(), max(200, avail.width() - dw))
+        new_h = min(inner.height(), max(200, avail.height() - dh))
+        if (new_w, new_h) != (inner.width(), inner.height()):
+            self.dock.resize(new_w, new_h)
+
+        frame = self.dock.frameGeometry()      # re-read after any resize
+        x = min(max(frame.x(), avail.x()), avail.x() + avail.width() - frame.width())
+        y = min(max(frame.y(), avail.y()), avail.y() + avail.height() - frame.height())
+        if (x, y) != (frame.x(), frame.y()):
+            self.dock.move(x, y)
+
+    def _centre_panel(self):
+        """Centre the floating panel on the QGIS main window."""
+        main = iface.mainWindow()
+        avail = self._screen_for_main_window().availableGeometry()
+
+        self.dock.resize(min(self.DEFAULT_PANEL_SIZE[0], avail.width() - 120),
+                         min(self.DEFAULT_PANEL_SIZE[1], avail.height() - 120))
+
+        frame = self.dock.frameGeometry()
+        ref = main.frameGeometry() if main is not None else avail
+        self.dock.move(ref.x() + (ref.width() - frame.width()) // 2,
+                       ref.y() + (ref.height() - frame.height()) // 2)
+        self._move_onto_screen()
+
+    def _restore_panel_state(self):
+        """Reopen the panel where the user last left it, when that is still valid."""
+        from qgis.PyQt.QtCore import QRect
+        from qgis.PyQt.QtWidgets import QApplication
+
+        floating = self.plugin_settings.value("panel/floating", True, type=bool)
+        geom = self.plugin_settings.value("panel/geometry")
+
+        self.dock.setFloating(floating)
+        if not floating:
+            return                      # docked: Qt handles the layout
+
+        rect = None
+        try:
+            if geom:
+                x, y, w, h = (int(v) for v in geom)
+                if w > 200 and h > 200:
+                    rect = QRect(x, y, w, h)
+        except (TypeError, ValueError):
+            rect = None
+
+        # Only reuse a saved position if a screen still covers it — otherwise the
+        # panel would reopen on a monitor that is no longer there.
+        if rect is not None and any(s.availableGeometry().intersects(rect)
+                                    for s in QApplication.screens()):
+            # rect holds the frame position and the inner size (see _save_panel_state)
+            self.dock.resize(rect.width(), rect.height())
+            self.dock.move(rect.x(), rect.y())
+            self._move_onto_screen()
+        else:
+            self._centre_panel()
+
+    def _save_panel_state(self):
+        """Remember the panel's placement for the next session."""
+        if self.dock is None:
+            return
+        try:
+            self.plugin_settings.setValue("panel/floating", self.dock.isFloating())
+            if self.dock.isFloating():
+                # Frame position (what move() takes) with the inner size (what
+                # resize() takes), so the pair round-trips through restore.
+                pos = self.dock.frameGeometry()
+                size = self.dock.geometry()
+                self.plugin_settings.setValue(
+                    "panel/geometry",
+                    [pos.x(), pos.y(), size.width(), size.height()])
+        except RuntimeError:
+            pass                        # dock already destroyed on the C++ side
 
     def unload(self):
-        QgsApplication.processingRegistry().removeProvider(self.provider)
+        if self.provider is not None:
+            QgsApplication.processingRegistry().removeProvider(self.provider)
+            self.provider = None
         if hasattr(self, 'edu_action'):
             iface.removePluginMenu('SZR+', self.edu_action)
             iface.removeToolBarIcon(self.edu_action)
-        #self.installer.unload()
-
-
-
-
-            
-          
+        if self.dock is not None:
+            self._save_panel_state()
+            iface.removeDockWidget(self.dock)
+            self.dock.deleteLater()   # also deletes the panel it owns
+            self.dock = None

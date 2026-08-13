@@ -2,7 +2,7 @@
 
 [![QGIS](https://img.shields.io/badge/QGIS-3.28+-blue.svg)](https://www.qgis.org)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
-[![Version](https://img.shields.io/badge/Version-1.9-green.svg)](https://github.com/PadiCR/SZRPlus)
+[![Version](https://img.shields.io/badge/Version-1.10-green.svg)](https://github.com/PadiCR/SZRPlus)
 
 ## Introduction
 

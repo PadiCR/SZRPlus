@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <ui version="4.0">
  <class>SzEduDialog</class>
- <widget class="QDialog" name="SzEduDialog">
+ <widget class="QWidget" name="SzEduDialog">
   <property name="geometry">
    <rect><x>0</x><y>0</y><width>1100</width><height>680</height></rect>
   </property>
@@ -48,7 +48,7 @@
        <!-- Right: stacked widget (pages built in Python) -->
        <item>
         <widget class="QStackedWidget" name="stackedWidget_r">
-         <property name="frameShape"><enum>QFrame::Box</enum></property>
+         <property name="frameShape"><enum>QFrame::NoFrame</enum></property>
          <widget class="QWidget" name="r_page_woe"/>
          <widget class="QWidget" name="r_page_fr"/>
          <widget class="QWidget" name="r_page_lr"/>
@@ -99,6 +99,11 @@
            <item><property name="text"><string>Correlation Plot</string></property></item>
           </widget>
          </item>
+         <item><spacer name="dp_cl_spacer">
+          <property name="orientation"><enum>Qt::Vertical</enum></property>
+          <property name="sizeType"><enum>QSizePolicy::Fixed</enum></property>
+          <property name="sizeHint" stdset="0"><size><width>0</width><height>16</height></size></property>
+         </spacer></item>
          <item><widget class="QLabel" name="lbl_cl_title">
           <property name="text"><string>Classify SI</string></property>
           <property name="font"><font><bold>true</bold></font></property>
@@ -116,7 +121,7 @@
        <!-- Right: stacked widget (pages built in Python) -->
        <item>
         <widget class="QStackedWidget" name="stackedWidget_v">
-         <property name="frameShape"><enum>QFrame::Box</enum></property>
+         <property name="frameShape"><enum>QFrame::NoFrame</enum></property>
          <widget class="QWidget" name="v_page_woe"/>
          <widget class="QWidget" name="v_page_fr"/>
          <widget class="QWidget" name="v_page_lr"/>
@@ -146,18 +151,8 @@
    </item>
   </layout>
  </widget>
- <customwidgets>
-  <customwidget>
-   <class>QgsFileWidget</class>
-   <extends>QWidget</extends>
-   <header>qgsfilewidget.h</header>
-  </customwidget>
-  <customwidget>
-   <class>QgsMapLayerComboBox</class>
-   <extends>QComboBox</extends>
-   <header>qgsmaplayer combobox.h</header>
-  </customwidget>
- </customwidgets>
+ <!-- Every QGIS custom widget in this panel is created in Python, so no
+      <customwidgets> promotions are needed here. -->
  <resources/>
  <connections/>
 </ui>

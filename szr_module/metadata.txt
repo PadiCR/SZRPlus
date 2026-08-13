@@ -6,7 +6,7 @@
 name=SZR+
 qgisMinimumVersion=3.28
 description=SZR+ (Susceptibility Zoning + Raster capabilities)
-version=1.9
+version=1.10
 author=Cristobal Padilla
 email=cristobalpadilla@gmail.com
 
@@ -19,7 +19,8 @@ repository=https://github.com/PadiCR/SZRPlus
 # Recommended items:
 
 hasProcessingProvider=yes
-changelog=1.9 - Minor information panel text edits and clarifications.
+changelog=1.10 - GUI now a dockable QGIS panel with an in-panel message bar; theme-aware styling (light/dark); native extent and multi-field selectors; runs execute on the QGIS task manager and are cancellable; much faster start-up (dependencies are no longer re-checked via pip on every launch); pages are built on demand. Fixes: Vector Base runs failing with an undefined variable, Classify Vector by ROC/Weighted ROC failing on a bad parameter key, and Data Preparation failing when a non-temporary output file was chosen.
+    1.9 - Minor information panel text edits and clarifications.
 
 # Tags are comma separated with spaces allowed
 tags=susceptibility, cross-validation, pre-processing, statistical methods, hazard
