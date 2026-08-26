@@ -30,6 +30,7 @@ __date__ = '2026-04-08'
 __copyright__ = '(C) 2026 by Cristobal A. Padilla Moreno'
 
 import os
+import re
 import tempfile
 from osgeo import gdal
 gdal.SetConfigOption('GDAL_MEM_ENABLE_OPEN', 'YES')
@@ -40,7 +41,8 @@ from qgis.PyQt.QtWidgets import (
     QTreeView, QMessageBox, QProgressBar,
     QTabWidget, QAbstractItemView, QCheckBox, QScrollArea, QAbstractScrollArea,
     QFileSystemModel, QSizePolicy, QHeaderView, QFrame,
-    QLineEdit, QToolButton, QMenu, QAction, QFileDialog, QApplication
+    QLineEdit, QToolButton, QMenu, QAction, QFileDialog, QApplication, QStyle,
+    QComboBox
 )
 from qgis.PyQt.QtCore import (
     Qt, QDir, QMimeData, QUrl, pyqtSignal
@@ -107,54 +109,262 @@ INFO_DICT = {
     ),
     'ROC Generator (Raster)': '<b>ROC Generator</b><br>Generates the Receiver Operating Characteristic (ROC) curve directly from the given SI Raster and the Landslide Inventory Raster.<br><br><b>Output:</b><br>- A `.png` image of the ROC plot including Area Under the Curve (AUC), Distance to the perfect (0,1) classifier (DIS), and Critical Success Index (CSI / Threat Score).<br>- A `.csv` file containing False Positive Rates, True Positive Rates, and their respective thresholds.',
     'Confusion Matrix (FP/TN Threshold) (Raster)': '<b>Confusion Matrix (Raster)</b><br>Evaluates the spatial predictive performance of the model using a defined threshold (or the Youden index if 0 is provided). It calculates the confusion matrix (True Positives, True Negatives, False Positives, False Negatives) for the SI Raster against the Landslide Inventory.<br><br><b>Output:</b><br>- A `.csv` file with the performance metrics.',
-    # ── New Raster Classify SI methods ───────────────────────────────────────
+    # ── ROC-threshold Classify SI methods ────────────────────────────────────
+    # Raster and vector entries are generated from the same wording, so the
+    # two panels describe each method identically.
     'Classify by Closest Point (0,1)': (
-        '<b>Classify by Closest Point (0,1)</b><br><br>'
-        '<b>Description:</b><br>'
-        'This is the geometric "cousin" of Youden\'s Index. It finds the threshold point on the ROC curve that is spatially closest to the "perfect" classifier (top-left corner).<br><br>'
-        '<b>Formula:</b><br>'
-        'd = &radic;((1 &minus; Sensitivity)&sup2; + FPR&sup2;)<br><br>'
-        '<b>Reclassification:</b><br>'
-        'The optimal threshold point defines the boundary of the highest susceptibility class. The remaining N&minus;1 classes are distributed using equal intervals below this threshold.<br><br>'
-        '<b>Focus:</b><br>'
-        'Balanced geometric trade-off in the ROC space.<br><br>'
-        '<b>Best for:</b><br>'
-        'When you want a mathematically neutral boundary between low and high susceptibility, based on the straight-line distance in ROC space rather than the vertical distance from the diagonal.<br><br>'
-        '<b>Output:</b><br>'
-        '- A CSV file with the calculated cutoff values.<br>'
-        '- A reclassified GeoTIFF raster (N classes, RdYlGn color ramp) added to QGIS.'
+        '<b>Classify by Closest Point (0,1)</b><br><br><b>Description:</b><br>This is '
+        'the geometric "cousin" of Youden\'s Index. It finds the threshold point on '
+        'the ROC curve that is spatially closest to the "perfect" classifier '
+        '(top-left corner).<br><br><b>Formula:</b><br>d = &radic;((1 &minus; '
+        'Sensitivity)&sup2; + FPR&sup2;)<br><br><b>Reclassification:</b><br>The '
+        'optimal threshold point defines the lower bound of the highest '
+        'susceptibility class. The remaining N&minus;1 classes divide the range below '
+        'it, following the Class Break Method chosen in the '
+        'form.<br><br><b>Focus:</b><br>Balanced geometric trade-off in the ROC '
+        'space.<br><br><b>Best for:</b><br>When you want a mathematically neutral '
+        'boundary between low and high susceptibility, based on the straight-line '
+        'distance in ROC space rather than the vertical distance from the '
+        'diagonal.<br><br><b>Class Break Method:</b><br>The highest class always '
+        'begins at the optimal threshold &mdash; that is the boundary the ROC '
+        'analysis chose. This option only controls how the range below it is '
+        'divided:<br>- <i>Equal interval</i>: classes of equal SI width.<br>- '
+        '<i>Quantile</i>: classes holding roughly the same number of pixels, usually '
+        'preferable for the skewed SI that WoE and FR produce.<br><br><b>Inputs '
+        'Required:</b><br>- Landslide Inventory Raster: binary raster, 1 for presence '
+        'and 0 for absence of landslide.<br>- SI Raster: the continuous '
+        'Susceptibility Index to classify.<br>- Number of Classes (2 to 10).<br>- '
+        'Class Break Method and an output folder.<br><br><b>Output:</b><br>- A CSV '
+        'file with the calculated cutoff values.<br>- A CSV file with the confusion '
+        'matrix and the performance metrics (precision, recall, F1, CSI, Youden\'s J, '
+        'AUC) at the chosen threshold.<br>- A reclassified GeoTIFF raster (N classes, '
+        'RdYlGn colour ramp, named classes) added to QGIS.'
     ),
     'Classify by F1-Score': (
-        '<b>Classify by F1-Score</b><br><br>'
-        '<b>Description:</b><br>'
-        'Balances precision (how many pixels predicted as "high susceptibility" were actually landslides) and recall (how many total landslides were caught) to find the most representative class boundary.<br><br>'
-        '<b>Formula:</b><br>'
-        'F1 = 2&times;TP / (2&times;TP + FP + FN)<br><br>'
-        '<b>Reclassification:</b><br>'
-        'The threshold that maximizes the F1-score is calculated along the ROC curve and used to designate the boundary for the highest susceptibility class.<br><br>'
-        '<b>Focus:</b><br>'
-        'Reliable prediction quality and classification accuracy.<br><br>'
-        '<b>Best for:</b><br>'
-        'Imbalanced datasets (e.g., landslides covering &lt; 5% of the area) as it ensures the high-susceptibility class is trustworthy and not overpredicted.<br><br>'
-        '<b>Output:</b><br>'
-        '- A CSV file with the calculated cutoff values.<br>'
-        '- A reclassified GeoTIFF raster (N classes, RdYlGn color ramp) added to QGIS.'
+        '<b>Classify by F1-Score</b><br><br><b>Description:</b><br>Balances precision '
+        '(how many pixels predicted as "high susceptibility" were actually '
+        'landslides) and recall (how many total landslides were caught) to find the '
+        'most representative class boundary. True Negatives are ignored, which is '
+        'what makes it suitable for rare events.<br><br><b>Formula:</b><br>F1 = '
+        '2&times;TP / (2&times;TP + FP + FN)<br><br><b>Reclassification:</b><br>The '
+        'threshold that maximizes the F1-score is calculated along the ROC curve and '
+        'used to designate the lower bound of the highest susceptibility class. The '
+        'remaining N&minus;1 classes divide the range below it, following the Class '
+        'Break Method chosen in the form.<br><br><b>Focus:</b><br>Reliable prediction '
+        'quality and classification accuracy.<br><br><b>Best for:</b><br>Imbalanced '
+        'datasets (e.g., landslides covering &lt; 5% of the area) as it ensures the '
+        'high-susceptibility class is trustworthy and not '
+        'overpredicted.<br><br><b>Note:</b><br>F1 and the Threat Score are '
+        'monotonically related (F1 = 2&times;CSI / (1 + CSI), which is strictly '
+        'increasing), so the two always select the <i>same</i> threshold. They differ '
+        'only in the score reported, never in the resulting map.<br><br><b>Class '
+        'Break Method:</b><br>The highest class always begins at the optimal '
+        'threshold &mdash; that is the boundary the ROC analysis chose. This option '
+        'only controls how the range below it is divided:<br>- <i>Equal interval</i>: '
+        'classes of equal SI width.<br>- <i>Quantile</i>: classes holding roughly the '
+        'same number of pixels, usually preferable for the skewed SI that WoE and FR '
+        'produce.<br><br><b>Inputs Required:</b><br>- Landslide Inventory Raster: '
+        'binary raster, 1 for presence and 0 for absence of landslide.<br>- SI '
+        'Raster: the continuous Susceptibility Index to classify.<br>- Number of '
+        'Classes (2 to 10).<br>- Class Break Method and an output '
+        'folder.<br><br><b>Output:</b><br>- A CSV file with the calculated cutoff '
+        'values.<br>- A CSV file with the confusion matrix and the performance '
+        'metrics (precision, recall, F1, CSI, Youden\'s J, AUC) at the chosen '
+        'threshold.<br>- A reclassified GeoTIFF raster (N classes, RdYlGn colour '
+        'ramp, named classes) added to QGIS.'
     ),
     'Classify by Threat Score (CSI)': (
-        '<b>Classify by Threat Score (CSI)</b><br><br>'
-        '<b>Description:</b><br>'
-        'A hazard detection measure that ignores True Negatives. It focuses purely on correctly identifying the presence of the hazard.<br><br>'
-        '<b>Formula:</b><br>'
-        'CSI = TP / (TP + FP + FN)<br><br>'
-        '<b>Reclassification:</b><br>'
-        'The threshold that maximizes the Critical Success Index (CSI) determines the boundary of the highest class, with lower classes spaced evenly below.<br><br>'
-        '<b>Focus:</b><br>'
-        'Hazard detection performance, ignoring stable zones.<br><br>'
-        '<b>Best for:</b><br>'
-        'When "low susceptibility" areas are secondary and the primary goal is maximizing the detection of future landslide events.<br><br>'
-        '<b>Output:</b><br>'
-        '- A CSV file with the calculated cutoff values.<br>'
-        '- A reclassified GeoTIFF raster (N classes, RdYlGn color ramp) added to QGIS.'
+        '<b>Classify by Threat Score (CSI)</b><br><br><b>Description:</b><br>A hazard '
+        'detection measure that ignores True Negatives. It focuses purely on '
+        'correctly identifying the presence of the hazard: the overlap between the '
+        'area predicted as susceptible and the area that actually failed, divided by '
+        'their union.<br><br><b>Formula:</b><br>CSI = TP / (TP + FP + '
+        'FN)<br><br><b>Reclassification:</b><br>The threshold that maximizes the '
+        'Critical Success Index (CSI) determines the lower bound of the highest '
+        'class. The remaining N&minus;1 classes divide the range below it, following '
+        'the Class Break Method chosen in the form.<br><br><b>Focus:</b><br>Hazard '
+        'detection performance, ignoring stable zones.<br><br><b>Best '
+        'for:</b><br>When "low susceptibility" areas are secondary and the primary '
+        'goal is maximizing the detection of future landslide '
+        'events.<br><br><b>Note:</b><br>The Threat Score and F1 always select the '
+        'same threshold (F1 = 2&times;CSI / (1 + CSI) is strictly increasing), so the '
+        'two produce identical maps.<br><br><b>Class Break Method:</b><br>The highest '
+        'class always begins at the optimal threshold &mdash; that is the boundary '
+        'the ROC analysis chose. This option only controls how the range below it is '
+        'divided:<br>- <i>Equal interval</i>: classes of equal SI width.<br>- '
+        '<i>Quantile</i>: classes holding roughly the same number of pixels, usually '
+        'preferable for the skewed SI that WoE and FR produce.<br><br><b>Inputs '
+        'Required:</b><br>- Landslide Inventory Raster: binary raster, 1 for presence '
+        'and 0 for absence of landslide.<br>- SI Raster: the continuous '
+        'Susceptibility Index to classify.<br>- Number of Classes (2 to 10).<br>- '
+        'Class Break Method and an output folder.<br><br><b>Output:</b><br>- A CSV '
+        'file with the calculated cutoff values.<br>- A CSV file with the confusion '
+        'matrix and the performance metrics (precision, recall, F1, CSI, Youden\'s J, '
+        'AUC) at the chosen threshold.<br>- A reclassified GeoTIFF raster (N classes, '
+        'RdYlGn colour ramp, named classes) added to QGIS.'
+    ),
+    "Classify by Youden's J": (
+        '<b>Classify by Youden\'s J</b><br><br><b>Description:</b><br>The classic '
+        'optimal-cutoff criterion. It finds the point on the ROC curve furthest above '
+        'the diagonal, i.e. the threshold at which the model gains the most true '
+        'positives per false positive.<br><br><b>Formula:</b><br>J = Sensitivity + '
+        'Specificity &minus; 1 = TPR &minus; '
+        'FPR<br><br><b>Reclassification:</b><br>The threshold that maximizes J '
+        'defines the lower bound of the highest susceptibility class. The remaining '
+        'N&minus;1 classes divide the range below it, following the Class Break '
+        'Method chosen in the form.<br><br><b>Focus:</b><br>Balanced discrimination, '
+        'independent of how rare landslides are.<br><br><b>Best for:</b><br>A '
+        'neutral, widely cited cutoff. Because TPR and FPR are each normalised within '
+        'their own class, Youden\'s J is insensitive to prevalence &mdash; unlike '
+        'F1-Score and Threat Score, which shift the cutoff upwards when landslides '
+        'are rare. Use it when the cutoff should describe the model rather than the '
+        'class balance of the inventory.<br><br><b>Class Break Method:</b><br>The '
+        'highest class always begins at the optimal threshold &mdash; that is the '
+        'boundary the ROC analysis chose. This option only controls how the range '
+        'below it is divided:<br>- <i>Equal interval</i>: classes of equal SI '
+        'width.<br>- <i>Quantile</i>: classes holding roughly the same number of '
+        'pixels, usually preferable for the skewed SI that WoE and FR '
+        'produce.<br><br><b>Inputs Required:</b><br>- Landslide Inventory Raster: '
+        'binary raster, 1 for presence and 0 for absence of landslide.<br>- SI '
+        'Raster: the continuous Susceptibility Index to classify.<br>- Number of '
+        'Classes (2 to 10).<br>- Class Break Method and an output '
+        'folder.<br><br><b>Output:</b><br>- A CSV file with the calculated cutoff '
+        'values.<br>- A CSV file with the confusion matrix and the performance '
+        'metrics (precision, recall, F1, CSI, Youden\'s J, AUC) at the chosen '
+        'threshold.<br>- A reclassified GeoTIFF raster (N classes, RdYlGn colour '
+        'ramp, named classes) added to QGIS.'
+    ),
+    'Classify Vector by Closest Point (0,1)': (
+        '<b>Classify Vector by Closest Point '
+        '(0,1)</b><br><br><b>Description:</b><br>This is the geometric "cousin" of '
+        'Youden\'s Index. It finds the threshold point on the ROC curve that is '
+        'spatially closest to the "perfect" classifier (top-left '
+        'corner).<br><br><b>Formula:</b><br>d = &radic;((1 &minus; Sensitivity)&sup2; '
+        '+ FPR&sup2;)<br><br><b>Reclassification:</b><br>The optimal threshold point '
+        'defines the lower bound of the highest susceptibility class. The remaining '
+        'N&minus;1 classes divide the range below it, following the Class Break '
+        'Method chosen in the form.<br><br><b>Focus:</b><br>Balanced geometric '
+        'trade-off in the ROC space.<br><br><b>Best for:</b><br>When you want a '
+        'mathematically neutral boundary between low and high susceptibility, based '
+        'on the straight-line distance in ROC space rather than the vertical distance '
+        'from the diagonal.<br><br><b>Class Break Method:</b><br>The highest class '
+        'always begins at the optimal threshold &mdash; that is the boundary the ROC '
+        'analysis chose. This option only controls how the range below it is '
+        'divided:<br>- <i>Equal interval</i>: classes of equal SI width.<br>- '
+        '<i>Quantile</i>: classes holding roughly the same number of slope units, '
+        'usually preferable for the skewed SI that WoE and FR '
+        'produce.<br><br><b>Inputs Required:</b><br>- Slope Units Vector layer '
+        'holding both fields below in its attribute table.<br>- SI Field: the '
+        'continuous Susceptibility Index to classify.<br>- Dependent Variable Field: '
+        'number of landslides per slope unit (&gt; 0 counts as presence).<br>- Number '
+        'of Classes (2 to 10).<br>- Class Break Method and an output '
+        'folder.<br><br><b>Output:</b><br>- A CSV file with the calculated cutoff '
+        'values.<br>- A CSV file with the confusion matrix and the performance '
+        'metrics (precision, recall, F1, CSI, Youden\'s J, AUC) at the chosen '
+        'threshold.<br>- A classified GeoPackage carrying an <i>SI_class</i> field '
+        'alongside every original attribute (N classes, RdYlGn colour ramp, named '
+        'classes) added to QGIS.'
+    ),
+    'Classify Vector by F1-Score': (
+        '<b>Classify Vector by F1-Score</b><br><br><b>Description:</b><br>Balances '
+        'precision (how many slope units predicted as "high susceptibility" were '
+        'actually landslides) and recall (how many total landslides were caught) to '
+        'find the most representative class boundary. True Negatives are ignored, '
+        'which is what makes it suitable for rare '
+        'events.<br><br><b>Formula:</b><br>F1 = 2&times;TP / (2&times;TP + FP + '
+        'FN)<br><br><b>Reclassification:</b><br>The threshold that maximizes the '
+        'F1-score is calculated along the ROC curve and used to designate the lower '
+        'bound of the highest susceptibility class. The remaining N&minus;1 classes '
+        'divide the range below it, following the Class Break Method chosen in the '
+        'form.<br><br><b>Focus:</b><br>Reliable prediction quality and classification '
+        'accuracy.<br><br><b>Best for:</b><br>Imbalanced datasets (e.g., landslides '
+        'covering &lt; 5% of the area) as it ensures the high-susceptibility class is '
+        'trustworthy and not overpredicted.<br><br><b>Note:</b><br>F1 and the Threat '
+        'Score are monotonically related (F1 = 2&times;CSI / (1 + CSI), which is '
+        'strictly increasing), so the two always select the <i>same</i> threshold. '
+        'They differ only in the score reported, never in the resulting '
+        'map.<br><br><b>Class Break Method:</b><br>The highest class always begins at '
+        'the optimal threshold &mdash; that is the boundary the ROC analysis chose. '
+        'This option only controls how the range below it is divided:<br>- <i>Equal '
+        'interval</i>: classes of equal SI width.<br>- <i>Quantile</i>: classes '
+        'holding roughly the same number of slope units, usually preferable for the '
+        'skewed SI that WoE and FR produce.<br><br><b>Inputs Required:</b><br>- Slope '
+        'Units Vector layer holding both fields below in its attribute table.<br>- SI '
+        'Field: the continuous Susceptibility Index to classify.<br>- Dependent '
+        'Variable Field: number of landslides per slope unit (&gt; 0 counts as '
+        'presence).<br>- Number of Classes (2 to 10).<br>- Class Break Method and an '
+        'output folder.<br><br><b>Output:</b><br>- A CSV file with the calculated '
+        'cutoff values.<br>- A CSV file with the confusion matrix and the performance '
+        'metrics (precision, recall, F1, CSI, Youden\'s J, AUC) at the chosen '
+        'threshold.<br>- A classified GeoPackage carrying an <i>SI_class</i> field '
+        'alongside every original attribute (N classes, RdYlGn colour ramp, named '
+        'classes) added to QGIS.'
+    ),
+    'Classify Vector by Threat Score (CSI)': (
+        '<b>Classify Vector by Threat Score (CSI)</b><br><br><b>Description:</b><br>A '
+        'hazard detection measure that ignores True Negatives. It focuses purely on '
+        'correctly identifying the presence of the hazard: the overlap between the '
+        'area predicted as susceptible and the area that actually failed, divided by '
+        'their union.<br><br><b>Formula:</b><br>CSI = TP / (TP + FP + '
+        'FN)<br><br><b>Reclassification:</b><br>The threshold that maximizes the '
+        'Critical Success Index (CSI) determines the lower bound of the highest '
+        'class. The remaining N&minus;1 classes divide the range below it, following '
+        'the Class Break Method chosen in the form.<br><br><b>Focus:</b><br>Hazard '
+        'detection performance, ignoring stable zones.<br><br><b>Best '
+        'for:</b><br>When "low susceptibility" areas are secondary and the primary '
+        'goal is maximizing the detection of future landslide '
+        'events.<br><br><b>Note:</b><br>The Threat Score and F1 always select the '
+        'same threshold (F1 = 2&times;CSI / (1 + CSI) is strictly increasing), so the '
+        'two produce identical maps.<br><br><b>Class Break Method:</b><br>The highest '
+        'class always begins at the optimal threshold &mdash; that is the boundary '
+        'the ROC analysis chose. This option only controls how the range below it is '
+        'divided:<br>- <i>Equal interval</i>: classes of equal SI width.<br>- '
+        '<i>Quantile</i>: classes holding roughly the same number of slope units, '
+        'usually preferable for the skewed SI that WoE and FR '
+        'produce.<br><br><b>Inputs Required:</b><br>- Slope Units Vector layer '
+        'holding both fields below in its attribute table.<br>- SI Field: the '
+        'continuous Susceptibility Index to classify.<br>- Dependent Variable Field: '
+        'number of landslides per slope unit (&gt; 0 counts as presence).<br>- Number '
+        'of Classes (2 to 10).<br>- Class Break Method and an output '
+        'folder.<br><br><b>Output:</b><br>- A CSV file with the calculated cutoff '
+        'values.<br>- A CSV file with the confusion matrix and the performance '
+        'metrics (precision, recall, F1, CSI, Youden\'s J, AUC) at the chosen '
+        'threshold.<br>- A classified GeoPackage carrying an <i>SI_class</i> field '
+        'alongside every original attribute (N classes, RdYlGn colour ramp, named '
+        'classes) added to QGIS.'
+    ),
+    "Classify Vector by Youden's J": (
+        '<b>Classify Vector by Youden\'s J</b><br><br><b>Description:</b><br>The '
+        'classic optimal-cutoff criterion. It finds the point on the ROC curve '
+        'furthest above the diagonal, i.e. the threshold at which the model gains the '
+        'most true positives per false positive.<br><br><b>Formula:</b><br>J = '
+        'Sensitivity + Specificity &minus; 1 = TPR &minus; '
+        'FPR<br><br><b>Reclassification:</b><br>The threshold that maximizes J '
+        'defines the lower bound of the highest susceptibility class. The remaining '
+        'N&minus;1 classes divide the range below it, following the Class Break '
+        'Method chosen in the form.<br><br><b>Focus:</b><br>Balanced discrimination, '
+        'independent of how rare landslides are.<br><br><b>Best for:</b><br>A '
+        'neutral, widely cited cutoff. Because TPR and FPR are each normalised within '
+        'their own class, Youden\'s J is insensitive to prevalence &mdash; unlike '
+        'F1-Score and Threat Score, which shift the cutoff upwards when landslides '
+        'are rare. Use it when the cutoff should describe the model rather than the '
+        'class balance of the inventory.<br><br><b>Class Break Method:</b><br>The '
+        'highest class always begins at the optimal threshold &mdash; that is the '
+        'boundary the ROC analysis chose. This option only controls how the range '
+        'below it is divided:<br>- <i>Equal interval</i>: classes of equal SI '
+        'width.<br>- <i>Quantile</i>: classes holding roughly the same number of '
+        'slope units, usually preferable for the skewed SI that WoE and FR '
+        'produce.<br><br><b>Inputs Required:</b><br>- Slope Units Vector layer '
+        'holding both fields below in its attribute table.<br>- SI Field: the '
+        'continuous Susceptibility Index to classify.<br>- Dependent Variable Field: '
+        'number of landslides per slope unit (&gt; 0 counts as presence).<br>- Number '
+        'of Classes (2 to 10).<br>- Class Break Method and an output '
+        'folder.<br><br><b>Output:</b><br>- A CSV file with the calculated cutoff '
+        'values.<br>- A CSV file with the confusion matrix and the performance '
+        'metrics (precision, recall, F1, CSI, Youden\'s J, AUC) at the chosen '
+        'threshold.<br>- A classified GeoPackage carrying an <i>SI_class</i> field '
+        'alongside every original attribute (N classes, RdYlGn colour ramp, named '
+        'classes) added to QGIS.'
     ),
 }
 
@@ -412,6 +622,93 @@ def _style_si_vector(v_lyr):
         v_lyr.triggerRepaint()
     except Exception as e:
         QgsMessageLog.logMessage(f"Error styling SI vector: {e}", LOG_TAG, Qgis.Warning)
+
+
+def _attr_value(feature, field):
+    """A feature's attribute as a float, or None when it is NULL/unparseable.
+
+    QGIS hands a NULL attribute back as a null QVariant rather than None, so
+    checking for None alone is not enough.
+    """
+    import math
+    value = feature[field]
+    if value is None or (hasattr(value, 'isNull') and value.isNull()):
+        return None
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return None
+    return None if math.isnan(value) else value
+
+
+def _style_classified_vector(v_lyr, class_field, n_classes):
+    """Render a classified SI vector the way the raster tools render their raster.
+
+    Same RdYlGn_r ramp and the same descriptive class names, so a vector and a
+    raster susceptibility map of the same area read identically in the legend.
+    """
+    try:
+        from qgis.core import (QgsCategorizedSymbolRenderer, QgsRendererCategory,
+                               QgsSymbol)
+        from ..scripts.si_classify import class_names
+
+        cmap = _colormap('RdYlGn_r')
+        names = class_names(n_classes)
+        categories = []
+        for i in range(1, n_classes + 1):
+            rgba = cmap((i - 1) / max(1, n_classes - 1))
+            color = QColor(int(rgba[0] * 255), int(rgba[1] * 255), int(rgba[2] * 255))
+            sym = QgsSymbol.defaultSymbol(v_lyr.geometryType())
+            sym.setColor(color)
+            categories.append(QgsRendererCategory(i, sym, names[i]))
+
+        v_lyr.setRenderer(QgsCategorizedSymbolRenderer(class_field, categories))
+        v_lyr.triggerRepaint()
+    except Exception as e:
+        QgsMessageLog.logMessage(f"Error styling classified SI vector: {e}",
+                                 LOG_TAG, Qgis.Warning)
+
+
+def _write_classified_vector(src_layer, si_field, edges, out_path,
+                             class_field='SI_class'):
+    """Copy `src_layer` to `out_path`, adding an integer class field.
+
+    Every original attribute and geometry is carried over; the new field holds
+    1..n from `edges`, or NULL where the SI itself is NULL.
+    """
+    from qgis.core import (QgsFields, QgsField, QgsVectorFileWriter, QgsFeature,
+                           QgsProject)
+    from qgis.PyQt.QtCore import QVariant
+    from ..scripts.si_classify import assign_classes
+
+    fields = QgsFields()
+    for f in src_layer.fields():
+        fields.append(f)
+    fields.append(QgsField(class_field, QVariant.Int))
+
+    options = QgsVectorFileWriter.SaveVectorOptions()
+    options.driverName = 'GPKG'
+    options.fileEncoding = 'UTF-8'
+    options.layerName = 'classified'
+
+    writer = QgsVectorFileWriter.create(
+        out_path, fields, src_layer.wkbType(), src_layer.crs(),
+        QgsProject.instance().transformContext(), options)
+    if writer.hasError() != QgsVectorFileWriter.NoError:
+        raise Exception(f"Cannot create {out_path}: {writer.errorMessage()}")
+
+    try:
+        for feat in src_layer.getFeatures():
+            si = _attr_value(feat, si_field)
+            si_class = None if si is None else int(assign_classes([si], edges)[0])
+            out = QgsFeature(fields)
+            out.setGeometry(feat.geometry())
+            out.setAttributes(list(feat.attributes()) + [si_class])
+            writer.addFeature(out)
+    finally:
+        del writer
+
+    return out_path
 
 
 class SzTask(QgsTask):
@@ -688,6 +985,59 @@ class ChartsDialog(QDialog):
                 return
 
         super().closeEvent(event)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# New attribute field names
+# ─────────────────────────────────────────────────────────────────────────────
+# The classify tools add their new field to the input layer in place, so for a
+# shapefile the DBF rules apply: at most 10 characters, letters, digits and
+# underscores only, starting with a letter. OGR silently truncates anything
+# longer, after which the algorithm can no longer find the field it just
+# created and fails with a KeyError. GeoPackage is laxer, but the strict rule
+# works everywhere, so it is the one enforced.
+
+FIELD_NAME_MAXLEN = 10
+NEW_FIELD_LABEL = ("New Field Name  (max 10 chars; letters, digits and _ ; "
+                   "must start with a letter)")
+_FIELD_NAME_OK = re.compile(r'^[A-Za-z][A-Za-z0-9_]*$')
+
+
+def field_name_error(name):
+    """Say why `name` cannot be a new field name, or None when it can."""
+    if not name:
+        return "Enter a name for the new field."
+    if len(name) > FIELD_NAME_MAXLEN:
+        return (f"Too long: {len(name)} characters, the maximum is "
+                f"{FIELD_NAME_MAXLEN} (shapefile limit).")
+    if not _FIELD_NAME_OK.match(name):
+        if not re.match(r'[A-Za-z]', name[0]):
+            return "Must start with a letter."
+        bad = sorted({c for c in name if not re.match(r'[A-Za-z0-9_]', c)})
+        shown = ' '.join('space' if c == ' ' else c for c in bad)
+        return f"Only letters, digits and underscore are allowed. Remove: {shown}"
+    return None
+
+
+def _field_name_box(placeholder="e.g. class_id"):
+    """A field-name box that turns red and shows a warning icon when invalid."""
+    le = QLineEdit()
+    le.setPlaceholderText(placeholder)
+    warn = le.addAction(le.style().standardIcon(QStyle.SP_MessageBoxWarning),
+                        QLineEdit.TrailingPosition)
+    warn.setVisible(False)
+
+    def revalidate(_=None):
+        # An empty box is "not filled in yet", not "wrong" - stay neutral.
+        err = field_name_error(le.text()) if le.text() else None
+        le.setStyleSheet("QLineEdit { border: 1px solid #c0392b; }" if err else "")
+        le.setToolTip(err or "")
+        warn.setToolTip(err or "")
+        warn.setVisible(bool(err))
+
+    le.textChanged.connect(revalidate)
+    revalidate()
+    return le
 
 
 class ProcessingOutputWidget(QWidget):
@@ -1136,17 +1486,18 @@ def _make_vector_page(algo_name: str):
 
         # Output vector
         if mode == "binomial":
-            out_vec_test_widget, out_vec_test_refs = _file_widget_temp("Output Test GeoPackage", "GeoPackage (*.gpkg)", is_optional=True)
-            sp_layout.addLayout(_labeled("Output Test GeoPackage", out_vec_test_widget))
-
-            out_vec_train_widget, out_vec_train_refs = _file_widget_temp("Output Train/Fit GeoPackage", "GeoPackage (*.gpkg)", is_optional=True)
-            sp_layout.addLayout(_labeled("Output Train/Fit GeoPackage", out_vec_train_widget))
+            # Single main output: the train-fitted model applied to every slope
+            # unit, with a 'split' field recording which half each one was in.
+            out_vec_all_widget, out_vec_all_refs = _file_widget_temp("Output Susceptibility Index (SI) Geopackage", "GeoPackage (*.gpkg)")
+            sp_layout.addLayout(_labeled("Output Susceptibility Index (SI) Geopackage", out_vec_all_widget))
+            out_vec_test_widget = None
+            out_vec_test_refs = None
         else:
             # kfold mode
             out_vec_test_widget, out_vec_test_refs = _file_widget_temp("Output test/fit", "GeoPackage (*.gpkg)", is_optional=True)
             sp_layout.addLayout(_labeled("Output test/fit", out_vec_test_widget))
-            out_vec_train_widget = None
-            out_vec_train_refs = None
+            out_vec_all_widget = None
+            out_vec_all_refs = None
 
         if mode == "kfold":
             if 'WoE' in algo_name or 'FR' in algo_name:
@@ -1171,27 +1522,16 @@ def _make_vector_page(algo_name: str):
         sp_layout.addLayout(_labeled(folder_lbl, out_folder))
         
         # Link outputs to folder autocomplete
+        main_out_refs = out_vec_all_refs if mode == "binomial" else out_vec_test_refs
+
         def auto_populate_folder():
             if out_folder.filePath():
                 return
-            if mode == "binomial":
-                pct = spin.value()
-                if pct > 0:
-                    test_path = out_vec_test_refs['fw'].filePath()
-                    if test_path:
-                        out_folder.setFilePath(os.path.dirname(test_path))
-                else:
-                    train_path = out_vec_train_refs['fw'].filePath()
-                    if train_path:
-                        out_folder.setFilePath(os.path.dirname(train_path))
-            else:
-                test_path = out_vec_test_refs['fw'].filePath()
-                if test_path:
-                    out_folder.setFilePath(os.path.dirname(test_path))
+            path = main_out_refs['fw'].filePath()
+            if path:
+                out_folder.setFilePath(os.path.dirname(path))
 
-        out_vec_test_refs['fw'].fileChanged.connect(lambda path: auto_populate_folder() if path else None)
-        if out_vec_train_refs is not None:
-            out_vec_train_refs['fw'].fileChanged.connect(lambda path: auto_populate_folder() if path else None)
+        main_out_refs['fw'].fileChanged.connect(lambda path: auto_populate_folder() if path else None)
         spin.valueChanged.connect(lambda val: auto_populate_folder())
 
         run_box, run_btn, open_btn = _run_row(f"RUN  —  {algo_name}", "#27ae60")
@@ -1204,7 +1544,7 @@ def _make_vector_page(algo_name: str):
             'indep_combo': indep_combo,
             'spin': spin,
             'out_test': out_vec_test_refs,
-            'out_train': out_vec_train_refs,
+            'out_all': out_vec_all_refs,
             'folder': out_folder,
             'run_btn': run_btn,
             'open_btn': open_btn,
@@ -1827,6 +2167,18 @@ class SzEduPanel(QWidget, FORM_CLASS):
 
         return rlayer
 
+    def _field_name_ok(self, layer, name):
+        """Warn and return False when `name` cannot be added to `layer`."""
+        err = field_name_error(name)
+        if err:
+            self._warn(f"New Field Name - {err}", title="Invalid field name")
+            return False
+        if layer is not None and layer.fields().indexOf(name) >= 0:
+            self._warn(f'The layer already has a field named "{name}". '
+                       'Choose a different name.', title="Invalid field name")
+            return False
+        return True
+
     def _get_out_path(self, refs_dict, suffix=None, prefix=None, is_folder=False):
         if is_folder:
             w = refs_dict
@@ -1993,7 +2345,7 @@ class SzEduPanel(QWidget, FORM_CLASS):
                 ("Input Layer (vector)", lyr),
                 ("Classification .txt File", _file_widget("Classes txt", "Text (*.txt)")),
                 ("Field to Classify", fld),
-                ("New Field Name", self._line_edit("e.g. class_id")),
+                (NEW_FIELD_LABEL, _field_name_box()),
             ]
 
         def _classify_quantiles():
@@ -2001,7 +2353,7 @@ class SzEduPanel(QWidget, FORM_CLASS):
             return [
                 ("Input Layer (vector)", lyr),
                 ("Field to Classify", fld),
-                ("New Field Name", self._line_edit("e.g. class_id")),
+                (NEW_FIELD_LABEL, _field_name_box()),
                 ("Number of Quantiles (4=quartiles, 10=deciles)", self._spinbox(2, 100, 10)),
             ]
 
@@ -2065,6 +2417,19 @@ class SzEduPanel(QWidget, FORM_CLASS):
                 ("Output Folder", _folder_widget()),
             ]
 
+        def _classify_threshold():
+            # Closest Point / F1 / CSI / Youden: one optimal ROC threshold, then
+            # breaks below it - the same parameters as their raster twins.
+            lyr, si, dep = self._layer_field_pair(2)
+            return [
+                ("Input Layer (vector)", lyr),
+                ("SI Field", si),
+                ("Dependent Variable Field", dep),
+                ("Number of Classes (from 2 to 10)", self._spinbox(2, 10, 5)),
+                ("Class Break Method (below the threshold)", self._break_combo()),
+                ("Output Folder (Cutoffs & Classified Layer)", _folder_widget()),
+            ]
+
         def _roc_generator():
             lyr, si, dep = self._layer_field_pair(2)
             return [
@@ -2088,14 +2453,30 @@ class SzEduPanel(QWidget, FORM_CLASS):
         pages_cfg = [
             ("Classify Vector by ROC", _classify_roc),
             ("Classify Vector by Weighted ROC", _classify_rocw),
+            ("Classify Vector by Closest Point (0,1)", _classify_threshold),
+            ("Classify Vector by F1-Score", _classify_threshold),
+            ("Classify Vector by Threat Score (CSI)", _classify_threshold),
+            ("Classify Vector by Youden's J", _classify_threshold),
             ("ROC Generator", _roc_generator),
             ("Confusion Matrix (FP/TN Threshold)", _confusion_matrix),
         ]
+
+        # stackedWidget_v declares 20 pages: 6 algorithms, 10 Data Preparation
+        # and the 4 original Classify SI ones. The three new methods need their
+        # own placeholder slots at the end before they can be built on demand.
+        while self.stackedWidget_v.count() < self.CL_V_PAGE_OFFSET + len(pages_cfg):
+            self.stackedWidget_v.addWidget(QWidget())
 
         for i, (title, params_fn) in enumerate(pages_cfg):
             self._lazy_v[self.CL_V_PAGE_OFFSET + i] = (
                 lambda t=title, fn=params_fn: self._make_simple_page(
                     t, fn(), self._cl_refs, self._run_classify, "#c0392b"))
+
+        # The .ui hardcodes the original four; re-add all seven so the list rows
+        # line up with the stacked-widget indices (same as classify_list_r).
+        self.classify_list.clear()
+        for title, _ in pages_cfg:
+            self.classify_list.addItem(title)
 
     def _register_classify_raster_builders(self):
         """Register the raster Classify SI pages (built on first display)."""
@@ -2105,6 +2486,17 @@ class SzEduPanel(QWidget, FORM_CLASS):
                 ("Landslide Inventory Raster", self._rl_combo()),
                 ("SI Raster", self._rl_combo()),
                 ("Number of Classes (from 2 to 10)", self._spinbox(2, 10, 5)),
+                ("Output Folder (Cutoffs & Raster)", _folder_widget(force_physical=True)),
+            ]
+
+        def _threshold_params():
+            # Closest Point / F1 / CSI / Youden: same inputs as Classify by ROC
+            # plus the choice of how the sub-threshold range is divided.
+            return [
+                ("Landslide Inventory Raster", self._rl_combo()),
+                ("SI Raster", self._rl_combo()),
+                ("Number of Classes (from 2 to 10)", self._spinbox(2, 10, 5)),
+                ("Class Break Method (below the threshold)", self._break_combo()),
                 ("Output Folder (Cutoffs & Raster)", _folder_widget(force_physical=True)),
             ]
 
@@ -2125,16 +2517,17 @@ class SzEduPanel(QWidget, FORM_CLASS):
 
         pages_cfg = [
             ("Classify by ROC", _classified_params),
-            ("Classify by Closest Point (0,1)", _classified_params),
-            ("Classify by F1-Score", _classified_params),
-            ("Classify by Threat Score (CSI)", _classified_params),
+            ("Classify by Closest Point (0,1)", _threshold_params),
+            ("Classify by F1-Score", _threshold_params),
+            ("Classify by Threat Score (CSI)", _threshold_params),
+            ("Classify by Youden's J", _threshold_params),
             ("ROC Generator", _roc_generator_params),
             ("Confusion Matrix (FP/TN Threshold)", _confusion_matrix_params),
         ]
 
         # stackedWidget_r only declares the six algorithm pages in the .ui, so
-        # these need placeholders to occupy indices 6..11 until first shown.
-        for _ in pages_cfg:
+        # the Classify SI pages need placeholders until first shown.
+        while self.stackedWidget_r.count() < self.CL_R_PAGE_OFFSET + len(pages_cfg):
             self.stackedWidget_r.addWidget(QWidget())
 
         for i, (title, params_fn) in enumerate(pages_cfg):
@@ -2175,6 +2568,19 @@ class SzEduPanel(QWidget, FORM_CLASS):
         sb.setRange(min_v, max_v)
         sb.setValue(default)
         return sb
+
+    @staticmethod
+    def _break_combo():
+        """How the classes below the optimal threshold are divided."""
+        cb = QComboBox()
+        cb.addItem("Equal interval (equal SI width)", 'equal')
+        cb.addItem("Quantile (equal number of units)", 'quantile')
+        cb.setToolTip(
+            "The top class always starts at the optimal ROC threshold.\n"
+            "This only controls how the range below it is split:\n"
+            "  Equal interval - equal SI width, but skewed SI gives very uneven classes\n"
+            "  Quantile       - equal unit counts, better for area statistics")
+        return cb
 
     @staticmethod
     def _line_edit(placeholder):
@@ -2425,6 +2831,27 @@ class SzEduPanel(QWidget, FORM_CLASS):
             self._warn("Please check at least one Independent Variable field.")
             return
 
+        # WoE and FR only make sense on classified covariates. Catch continuous
+        # fields here so the user gets an explanation instead of a run that
+        # silently produces zeros.
+        if key in ('woe', 'fr'):
+            from ..scripts.algorithms import looks_continuous, continuous_covariate_message
+            n_rows = layer.featureCount()
+            offenders = []
+            for fname in indep_fields:
+                idx = layer.fields().indexOf(fname)
+                if idx < 0:
+                    continue
+                n_distinct = len(layer.uniqueValues(idx))
+                if looks_continuous(n_distinct, n_rows):
+                    offenders.append((fname, n_distinct))
+            if offenders:
+                short, detail = continuous_covariate_message(offenders, n_rows)
+                self.message_bar.pushMessage("Covariates are not classified",
+                                             short, detail, Qgis.Warning, 0)
+                self._log(detail, Qgis.Warning)
+                return
+
         # Percentage of test sample (binomial) or number of k-folds (kfold).
         spin_val = m_refs['spin'].value()
 
@@ -2433,64 +2860,64 @@ class SzEduPanel(QWidget, FORM_CLASS):
             self._warn("Please select an output folder.")
             return
 
-        out_test = self._get_out_path(m_refs['out_test'], suffix=".gpkg", prefix="Test_vector_")
-        if m_refs['out_train'] is not None:
-            out_train = self._get_out_path(m_refs['out_train'], suffix=".gpkg", prefix="Train_vector_")
+        if m_refs['out_test'] is not None:
+            out_test = self._get_out_path(m_refs['out_test'], suffix=".gpkg", prefix="Test_vector_")
         else:
-            out_train = None
+            out_test = None
+        if m_refs['out_all'] is not None:
+            out_all = self._get_out_path(m_refs['out_all'], suffix=".gpkg", prefix="SI_vector_")
+        else:
+            out_all = None
 
         algo_display = self.ALGO_NAMES[self.ALGO_KEYS_R.index(key)]
 
         def on_finished(_):
             is_folder_temp = m_refs['folder'].is_temp
-            
-            # Load Test layer
-            test_path = m_refs['out_test']['fw'].filePath()
-            is_test_temp = m_refs['out_test']['fw'].is_temp
-            if test_path:
-                from qgis.core import QgsVectorLayer
-                lyr = QgsVectorLayer(f"{test_path}|layername=test", f"{algo_display} Vector Test SI" if mode == "binomial" else f"{algo_display} Vector test/fit", "ogr")
-                if not lyr.isValid():
-                    lyr = QgsVectorLayer(test_path, f"{algo_display} Vector Test SI" if mode == "binomial" else f"{algo_display} Vector test/fit", "ogr")
-                if lyr.isValid():
-                    _style_si_vector(lyr)
-                    QgsProject.instance().addMapLayer(lyr)
-            elif is_test_temp:
-                if os.path.exists(out_test):
-                    lyr = load_as_memory_layer(out_test, "test", f"{algo_display} Vector Test SI" if mode == "binomial" else f"{algo_display} Vector test/fit")
-                    if lyr and lyr.isValid():
-                        _style_si_vector(lyr)
-                        QgsProject.instance().addMapLayer(lyr)
-                    try: os.remove(out_test)
-                    except: pass
-            else:
-                if os.path.exists(out_test):
-                    try: os.remove(out_test)
-                    except: pass
 
-            # Load Train/Fit layer (only in binomial mode)
-            if mode == 'binomial':
-                train_path = m_refs['out_train']['fw'].filePath()
-                is_train_temp = m_refs['out_train']['fw'].is_temp
-                if train_path:
+            # Main SI layer (binomial): every slope unit, with the split field
+            if m_refs['out_all'] is not None:
+                all_path = m_refs['out_all']['fw'].filePath()
+                is_all_temp = m_refs['out_all']['fw'].is_temp
+                if all_path:
                     from qgis.core import QgsVectorLayer
-                    lyr = QgsVectorLayer(f"{train_path}|layername=train", f"{algo_display} Vector Train SI", "ogr")
+                    lyr = QgsVectorLayer(f"{all_path}|layername=SI", f"{algo_display} Vector SI", "ogr")
                     if not lyr.isValid():
-                        lyr = QgsVectorLayer(train_path, f"{algo_display} Vector Train SI", "ogr")
+                        lyr = QgsVectorLayer(all_path, f"{algo_display} Vector SI", "ogr")
                     if lyr.isValid():
                         _style_si_vector(lyr)
                         QgsProject.instance().addMapLayer(lyr)
-                elif is_train_temp:
-                    if os.path.exists(out_train):
-                        lyr = load_as_memory_layer(out_train, "train", f"{algo_display} Vector Train SI")
+                elif is_all_temp:
+                    if os.path.exists(out_all):
+                        lyr = load_as_memory_layer(out_all, "SI", f"{algo_display} Vector SI")
                         if lyr and lyr.isValid():
                             _style_si_vector(lyr)
                             QgsProject.instance().addMapLayer(lyr)
-                        try: os.remove(out_train)
+                        try: os.remove(out_all)
+                        except: pass
+
+            # test/fit layer (k-fold): one SI per unit, each from its own fold
+            if m_refs['out_test'] is not None:
+                test_path = m_refs['out_test']['fw'].filePath()
+                is_test_temp = m_refs['out_test']['fw'].is_temp
+                if test_path:
+                    from qgis.core import QgsVectorLayer
+                    lyr = QgsVectorLayer(f"{test_path}|layername=test", f"{algo_display} Vector test/fit", "ogr")
+                    if not lyr.isValid():
+                        lyr = QgsVectorLayer(test_path, f"{algo_display} Vector test/fit", "ogr")
+                    if lyr.isValid():
+                        _style_si_vector(lyr)
+                        QgsProject.instance().addMapLayer(lyr)
+                elif is_test_temp:
+                    if os.path.exists(out_test):
+                        lyr = load_as_memory_layer(out_test, "test", f"{algo_display} Vector test/fit")
+                        if lyr and lyr.isValid():
+                            _style_si_vector(lyr)
+                            QgsProject.instance().addMapLayer(lyr)
+                        try: os.remove(out_test)
                         except: pass
                 else:
-                    if os.path.exists(out_train):
-                        try: os.remove(out_train)
+                    if os.path.exists(out_test):
+                        try: os.remove(out_test)
                         except: pass
 
             # Load Test ROC CSV as geometryless memory layer if folder is temporary
@@ -2509,16 +2936,14 @@ class SzEduPanel(QWidget, FORM_CLASS):
 
         self._start_task(f"{algo_display} ({mode})", self._call_vector_backend,
                          key, mode, layer.source(), dep_field, indep_fields,
-                         spin_val, out_test, out_train, out_folder,
+                         spin_val, out_test, out_all, out_folder,
                          on_success=on_finished)
 
     def _call_vector_backend(self, key, mode, layer_path,
                               dep_field, indep_fields,
-                              spin_val, out_test, out_train, out_folder):
+                              spin_val, out_test, out_all, out_folder):
         """Call the vector-based (slope-unit) algorithm backend."""
         from ..scripts.algorithms import Algorithms
-        from ..scripts.sz_train_simple import CoreAlgorithm
-        from ..scripts.sz_train_cv import CoreAlgorithm_cv
 
         algo_map = {
             'woe': (Algorithms.woe_simple, Algorithms.woe_cv),
@@ -2533,7 +2958,7 @@ class SzEduPanel(QWidget, FORM_CLASS):
         import os
         import tempfile
         from ..scripts.utils import SZ_utils
-        from ..scripts.utils_cv import CV_utils
+        from ..scripts.algorithms import CV_utils
 
         if not os.path.exists(out_folder):
             os.makedirs(out_folder, exist_ok=True)
@@ -2555,32 +2980,33 @@ class SzEduPanel(QWidget, FORM_CLASS):
                 'testN': spin_val,
                 'fold': out_folder
             }
+            # Scored with the train-fitted model but never fitted on, so every
+            # unit gets an SI on the same scale as the train/test halves.
+            alg_in['alldata'] = df
             trainsi, testsi = fn_simple(alg_in)
-            
+
+            # Record which half each unit fell in. The train rows carry fitted
+            # values, the test rows genuine predictions - this field is what
+            # lets you tell them apart afterwards.
+            df['split'] = 'Train'
             if spin_val > 0:
-                SZ_utils.save({
-                    'df': testsi,
-                    'crs': crs,
-                    'OUT': out_test or os.path.join(out_folder, 'test.gpkg')
-                })
-            
+                df.loc[testsi.index, 'split'] = 'Test'
+
             SZ_utils.save({
-                'df': trainsi,
+                'df': df,
                 'crs': crs,
-                'OUT': out_train or os.path.join(out_folder, 'train.gpkg')
+                'OUT': out_all
             })
 
             if spin_val == 0:
                 SZ_utils.stampfit({
-                    'nomi': nomi,
                     'df': trainsi,
                     'OUT': out_folder
                 })
             else:
                 SZ_utils.stamp_simple({
-                    'nomi': nomi,
-                    'df': trainsi,
-                    'df1': testsi,
+                    'train': trainsi,
+                    'test': testsi,
                     'OUT': out_folder
                 })
 
@@ -2861,9 +3287,11 @@ class SzEduPanel(QWidget, FORM_CLASS):
                 layer = refs["Input Layer (vector)"].currentLayer()
                 txt = refs["Classification .txt File"].filePath()
                 field = refs["Field to Classify"].currentField()
-                new_f = refs["New Field Name"].text()
-                if not layer or not txt or not field or not new_f:
+                new_f = refs[NEW_FIELD_LABEL].text().strip()
+                if not layer or not txt or not field:
                     self._warn("Please provide all parameters.")
+                    return
+                if not self._field_name_ok(layer, new_f):
                     return
                 self._set_running(f"Running {title}...")
                 from ..scripts.classcovtxt import classcovtxtAlgorithm
@@ -2874,10 +3302,12 @@ class SzEduPanel(QWidget, FORM_CLASS):
             elif title == "Classify Field in Quantiles":
                 layer = refs["Input Layer (vector)"].currentLayer()
                 field = refs["Field to Classify"].currentField()
-                new_f = refs["New Field Name"].text()
+                new_f = refs[NEW_FIELD_LABEL].text().strip()
                 num = refs["Number of Quantiles (4=quartiles, 10=deciles)"].value()
-                if not layer or not field or not new_f:
+                if not layer or not field:
                     self._warn("Please provide all parameters.")
+                    return
+                if not self._field_name_ok(layer, new_f):
                     return
                 self._set_running(f"Running {title}...")
                 from ..scripts.classcovdeciles import classcovdecAlgorithm
@@ -2914,6 +3344,67 @@ class SzEduPanel(QWidget, FORM_CLASS):
             self._error(f"{title} failed: {e}. "
                         "See the SZR+ tab of the Log Messages panel for details.")
 
+    def _read_si_and_truth(self, layer, si_field, dep_field):
+        """(y_true, y_scores) from a vector layer, skipping NULLs.
+
+        Returns (None, None) after warning when nothing usable is left.
+        """
+        import numpy as np
+        scores, truth = [], []
+        for feat in layer.getFeatures():
+            si = _attr_value(feat, si_field)
+            y = _attr_value(feat, dep_field)
+            if si is None or y is None:
+                continue
+            scores.append(si)
+            truth.append(1 if y > 0 else 0)
+
+        y_true = np.array(truth, dtype=int)
+        y_scores = np.array(scores, dtype=float)
+        if len(y_true) == 0:
+            self._warn("No features have both an SI and a dependent value.")
+            return None, None
+        if len(np.unique(y_true)) < 2:
+            self._warn("The dependent variable holds a single value; a ROC "
+                       "threshold needs both landslide and non-landslide units.")
+            return None, None
+        return y_true, y_scores
+
+    def _write_classification_metrics(self, y_true, y_scores, edges, out_folder,
+                                      method_label):
+        """Report how the chosen cut actually performs, not just where it is.
+
+        The operating point is the lower bound of the top class - everything at
+        or above it is what the map calls susceptible.
+        """
+        from ..scripts.si_classify import classification_metrics, write_metrics_csv
+        try:
+            metrics = classification_metrics(y_true, y_scores, edges[-2])
+            write_metrics_csv(
+                os.path.join(out_folder, f"classification_metrics_{method_label}.csv"),
+                metrics)
+        except Exception as e:
+            self._log(f"Could not write the classification metrics: {e}", Qgis.Warning)
+
+    def _emit_classified_vector(self, layer, si_field, edges, n_classes,
+                                out_folder, method_label, refs):
+        """Write the classified GeoPackage, add it, and style it like the raster."""
+        from qgis.core import QgsVectorLayer
+
+        out_gpkg = os.path.join(out_folder, f"classified_SI_{method_label}.gpkg")
+        _write_classified_vector(layer, si_field, edges, out_gpkg)
+
+        name = f"Classified SI ({method_label})"
+        v_lyr = QgsVectorLayer(f"{out_gpkg}|layername=classified", name, "ogr")
+        if not v_lyr.isValid():
+            v_lyr = QgsVectorLayer(out_gpkg, name, "ogr")
+        if v_lyr.isValid():
+            _style_classified_vector(v_lyr, 'SI_class', n_classes)
+            QgsProject.instance().addMapLayer(v_lyr)
+        else:
+            self._log(f"Classified layer could not be loaded: {out_gpkg}", Qgis.Warning)
+        return out_gpkg
+
     def _run_classify(self, title: str):
         refs = self._cl_refs[title]
         layer = refs["Input Layer (vector)"].currentLayer()
@@ -2945,25 +3436,38 @@ class SzEduPanel(QWidget, FORM_CLASS):
                 alg = classvAlgorithm()
                 alg.f = __import__('tempfile').gettempdir()
                 df, crs = alg.load(alg_params)
+                n_classes = refs["Number of Classes (from 2 to 10)"].value()
                 alg.classy({
                     'df': df,
-                    'NUMBER': refs["Number of Classes (from 2 to 10)"].value(),
+                    'NUMBER': n_classes,
                     'OUTPUT': out_folder
                 })
-                
+
+                # The genetic search writes its winning edges to SIclasses.csv
+                # as [min, break1, ..., break(n-1), max] - the same layout the
+                # threshold methods build, so the same writer/styler applies.
+                import numpy as np
+                edges = list(np.atleast_1d(
+                    np.loadtxt(os.path.join(out_folder, "SIclasses.csv"), delimiter=',')))
+                y_true_roc, y_scores_roc = self._read_si_and_truth(layer, si_field, dep_field)
+                if y_true_roc is not None:
+                    self._write_classification_metrics(y_true_roc, y_scores_roc, edges,
+                                                       out_folder, "ROC")
+                self._emit_classified_vector(layer, si_field, edges, n_classes,
+                                             out_folder, "ROC", refs)
+
                 is_folder_temp = refs["Output Folder"].is_temp
                 if is_folder_temp:
-                    import os
                     csv_path = os.path.join(out_folder, "plotROC.csv")
                     if os.path.exists(csv_path):
                         csv_lyr = csv_to_memory_layer(csv_path, "Classify Vector by ROC (plotROC)")
                         if csv_lyr and csv_lyr.isValid():
                             QgsProject.instance().addMapLayer(csv_lyr)
-                            
+
                 self._set_finished()
                 self._set_results_folder(refs, out_folder)
                 self._info(f"Classify Vector by ROC completed. Saved to {out_folder}")
-                
+
             elif title == "Classify Vector by Weighted ROC":
                 w_field = refs["Weight Field"].currentField()
                 if not w_field:
@@ -2992,7 +3496,6 @@ class SzEduPanel(QWidget, FORM_CLASS):
                 
                 is_folder_temp = refs["Output Folder"].is_temp
                 if is_folder_temp:
-                    import os
                     csv_path = os.path.join(out_folder, "plotROCW.csv")
                     if os.path.exists(csv_path):
                         csv_lyr = csv_to_memory_layer(csv_path, "Classify Vector by Weighted ROC (plotROCW)")
@@ -3002,6 +3505,56 @@ class SzEduPanel(QWidget, FORM_CLASS):
                 self._set_finished()
                 self._set_results_folder(refs, out_folder)
                 self._info(f"Classify Vector by Weighted ROC completed. Saved to {out_folder}")
+
+            elif title in ("Classify Vector by Closest Point (0,1)",
+                           "Classify Vector by F1-Score",
+                           "Classify Vector by Threat Score (CSI)",
+                           "Classify Vector by Youden's J"):
+                method = {"Classify Vector by Closest Point (0,1)": 'closest_point',
+                          "Classify Vector by F1-Score":            'f1',
+                          "Classify Vector by Threat Score (CSI)":  'csi',
+                          "Classify Vector by Youden's J":          'youden'}[title]
+                out_folder = self._get_out_path(
+                    refs["Output Folder (Cutoffs & Classified Layer)"], is_folder=True)
+                if not out_folder:
+                    self._warn("Please specify an Output Folder.")
+                    return
+                n_classes = refs["Number of Classes (from 2 to 10)"].value()
+                break_mode = refs["Class Break Method (below the threshold)"].currentData()
+                self._set_running(f"Running {title}...")
+
+                from ..scripts.si_classify import (optimal_threshold, cutoff_edges,
+                                                   write_cutoffs_csv, METHOD_LABELS)
+
+                y_true, y_scores = self._read_si_and_truth(layer, si_field, dep_field)
+                if y_true is None:
+                    return
+
+                label = METHOD_LABELS[method]
+                threshold = optimal_threshold(y_true, y_scores, method)
+                edges = cutoff_edges(y_scores, threshold, n_classes, break_mode)
+
+                os.makedirs(out_folder, exist_ok=True)
+                write_cutoffs_csv(
+                    os.path.join(out_folder, f"classification_cutoffs_{label}.csv"), edges)
+                self._write_classification_metrics(y_true, y_scores, edges,
+                                                   out_folder, label)
+
+                self._emit_classified_vector(layer, si_field, edges, n_classes,
+                                             out_folder, label, refs)
+
+                if refs["Output Folder (Cutoffs & Classified Layer)"].is_temp:
+                    for fname, lname in (
+                            (f"classification_cutoffs_{label}.csv", f"{title} Cutoffs"),
+                            (f"classification_metrics_{label}.csv", f"{title} Metrics")):
+                        csv_lyr = csv_to_memory_layer(os.path.join(out_folder, fname), lname)
+                        if csv_lyr and csv_lyr.isValid():
+                            QgsProject.instance().addMapLayer(csv_lyr)
+
+                self._set_finished()
+                self._set_results_folder(refs, out_folder)
+                self._info(f"{title} completed (optimal SI threshold {threshold:.4f}). "
+                           f"Saved to {out_folder}")
 
             elif title == "ROC Generator":
                 out_folder = self._get_out_path(refs["Output Folder"], is_folder=True)
@@ -3088,6 +3641,7 @@ class SzEduPanel(QWidget, FORM_CLASS):
         si_layer  = refs["SI Raster"].currentLayer()
         num_classes = None
         cutoff = None
+        break_mode = 'equal'
 
         if algo_name == "ROC Generator":
             folder_widget = refs["Output Folder"]
@@ -3097,6 +3651,8 @@ class SzEduPanel(QWidget, FORM_CLASS):
         else:
             folder_widget = refs["Output Folder (Cutoffs & Raster)"]
             num_classes = refs["Number of Classes (from 2 to 10)"].value()
+            if "Class Break Method (below the threshold)" in refs:
+                break_mode = refs["Class Break Method (below the threshold)"].currentData()
 
         out_folder = self._get_out_path(folder_widget, is_folder=True)
 
@@ -3119,6 +3675,7 @@ class SzEduPanel(QWidget, FORM_CLASS):
         # Freeze the values that were resolved on the main thread.
         _num_classes = num_classes
         _cutoff      = cutoff
+        _break_mode  = break_mode
         _out_folder  = out_folder
         _algo_name   = algo_name
         _is_folder_temp = is_folder_temp
@@ -3216,6 +3773,12 @@ class SzEduPanel(QWidget, FORM_CLASS):
                         for i in range(_num_classes):
                             writer.writerow([i + 1, cutoffs[i], cutoffs[i + 1]])
 
+                    from ..scripts.si_classify import (classification_metrics,
+                                                       write_metrics_csv)
+                    write_metrics_csv(
+                        os.path.join(_out_folder, "classification_metrics_ROC.csv"),
+                        classification_metrics(y_true, y_scores, cutoffs[-2]))
+
                     out_tif = os.path.join(_out_folder, "reclassified_SI_ROC.tif")
                     driver  = gdal.GetDriverByName('GTiff')
                     ds_out  = driver.Create(out_tif, xsize, ysize, 1, gdal.GDT_Float32)
@@ -3279,56 +3842,32 @@ class SzEduPanel(QWidget, FORM_CLASS):
                     }
 
                 # ── Closest Point / F1-Score / Threat Score (CSI) ────────────────
-                elif _algo_name in ("Classify by Closest Point (0,1)", "Classify by F1-Score", "Classify by Threat Score (CSI)"):
-                    fpr_arr, tpr_arr, thresholds_arr = roc_curve(y_true, y_scores)
+                elif _algo_name in ("Classify by Closest Point (0,1)", "Classify by F1-Score",
+                                    "Classify by Threat Score (CSI)", "Classify by Youden's J"):
+                    # Same helpers as the vector Classify SI tools, so the two
+                    # modes pick the same threshold and the same class edges.
+                    from ..scripts.si_classify import (optimal_threshold, cutoff_edges,
+                                                       write_cutoffs_csv, METHOD_LABELS,
+                                                       classification_metrics,
+                                                       write_metrics_csv)
+                    method = {"Classify by Closest Point (0,1)": 'closest_point',
+                              "Classify by F1-Score":            'f1',
+                              "Classify by Threat Score (CSI)":  'csi',
+                              "Classify by Youden's J":          'youden'}[_algo_name]
+                    method_label = METHOD_LABELS[method]
 
-                    if _algo_name == "Classify by Closest Point (0,1)":
-                        distances    = np.sqrt((1 - tpr_arr) ** 2 + fpr_arr ** 2)
-                        best_idx     = np.argmin(distances)
-                        method_label = "ClosestPoint"
-                    elif _algo_name == "Classify by F1-Score":
-                        P = float(np.sum(y_true == 1))
-                        N = float(np.sum(y_true == 0))
-                        tp_arr = tpr_arr * P
-                        fp_arr = fpr_arr * N
-                        fn_arr = P - tp_arr
-                        denom  = 2 * tp_arr + fp_arr + fn_arr
-                        f1_arr = np.where(denom > 0, 2 * tp_arr / denom, 0)
-                        best_idx     = np.argmax(f1_arr)
-                        method_label = "F1Score"
-                    elif _algo_name == "Classify by Threat Score (CSI)":
-                        P = float(np.sum(y_true == 1))
-                        N = float(np.sum(y_true == 0))
-                        tp_arr  = tpr_arr * P
-                        fp_arr  = fpr_arr * N
-                        fn_arr  = P - tp_arr
-                        denom   = tp_arr + fp_arr + fn_arr
-                        csi_arr = np.where(denom > 0, tp_arr / denom, 0)
-                        best_idx     = np.argmax(csi_arr)
-                        method_label = "ThreatScore_CSI"
+                    opt_threshold = optimal_threshold(y_true, y_scores, method)
+                    edges = cutoff_edges(y_scores, opt_threshold, _num_classes, _break_mode)
 
-                    opt_threshold = thresholds_arr[best_idx]
-                    si_min = np.nanmin(y_scores)
-                    si_max = np.nanmax(y_scores)
-
-                    if _num_classes > 1:
-                        lower_breaks = np.linspace(si_min, opt_threshold, num=_num_classes)
-                        cutoff_edges = np.append(lower_breaks, si_max + 1)
-                    else:
-                        cutoff_edges = [si_min, si_max + 1]
-
-                    reclassified_raw = np.digitize(y_scores_raw, cutoff_edges[1:-1]) + 1
+                    reclassified_raw = np.digitize(y_scores_raw, edges[1:-1]) + 1
                     reclassified_raw = reclassified_raw.astype(np.float32)
                     reclassified_raw[y_scores_raw == si_ndv] = si_ndv
 
-                    # Save cutoff CSV
-                    import csv
                     csv_path = os.path.join(_out_folder, f"classification_cutoffs_{method_label}.csv")
-                    with open(csv_path, 'w', newline='') as f_csv:
-                        writer = csv.writer(f_csv)
-                        writer.writerow(['Class', 'Lower Bound', 'Upper Bound'])
-                        for i in range(_num_classes):
-                            writer.writerow([i + 1, cutoff_edges[i], cutoff_edges[i + 1]])
+                    write_cutoffs_csv(csv_path, edges)
+                    write_metrics_csv(
+                        os.path.join(_out_folder, f"classification_metrics_{method_label}.csv"),
+                        classification_metrics(y_true, y_scores, edges[-2]))
 
                     # Write reclassified raster
                     out_tif = os.path.join(_out_folder, f"reclassified_SI_{method_label}.tif")
@@ -3413,10 +3952,12 @@ class SzEduPanel(QWidget, FORM_CLASS):
                 if csv_lyr and csv_lyr.isValid():
                     QgsProject.instance().addMapLayer(csv_lyr)
             elif method_label:
-                csv_path = os.path.join(out_folder, f"classification_cutoffs_{method_label}.csv")
-                csv_lyr = csv_to_memory_layer(csv_path, f"{algo_name} Cutoffs")
-                if csv_lyr and csv_lyr.isValid():
-                    QgsProject.instance().addMapLayer(csv_lyr)
+                for fname, lname in (
+                        (f"classification_cutoffs_{method_label}.csv", f"{algo_name} Cutoffs"),
+                        (f"classification_metrics_{method_label}.csv", f"{algo_name} Metrics")):
+                    csv_lyr = csv_to_memory_layer(os.path.join(out_folder, fname), lname)
+                    if csv_lyr and csv_lyr.isValid():
+                        QgsProject.instance().addMapLayer(csv_lyr)
 
             self._show_charts(out_folder, algo_name or "Classify Raster", True)
 
@@ -3445,14 +3986,8 @@ class SzEduPanel(QWidget, FORM_CLASS):
         # Build colour palette (main thread – safe to use Qt colour types here)
         cmap = _colormap('RdYlGn_r')
 
-        if num_classes == 2:
-            class_names = {1: "Low", 2: "High"}
-        elif num_classes == 3:
-            class_names = {1: "Low", 2: "Moderate", 3: "High"}
-        elif num_classes == 5:
-            class_names = {1: "Very Low", 2: "Low", 3: "Moderate", 4: "High", 5: "Very High"}
-        else:
-            class_names = {i: f"Class {i}" for i in range(1, num_classes + 1)}
+        from ..scripts.si_classify import class_names as _class_names
+        class_names = _class_names(num_classes)
 
         classes = []
         for i in range(1, num_classes + 1):

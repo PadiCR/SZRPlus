@@ -22,6 +22,8 @@ coverage.xml
 *.zip
 *.rar
 *.qgz
+# ...but the sample datasets need their QGIS projects to be usable.
+!test_sample/**/*.qgz
 *.qgs~
 *.qgs.bak
 *.bak

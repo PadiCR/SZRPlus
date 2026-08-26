@@ -320,12 +320,12 @@ class SZ_utils():
         fields = QgsFields()
 
         for field in nomi:
-            if field=='ID':
-                fields.append(QgsField(field, QVariant.Int))
             if field=='geom':
                 continue
-            if field=='y':
+            if field=='ID' or field=='y':
                 fields.append(QgsField(field, QVariant.Int))
+            elif df[field].dtype==object:
+                fields.append(QgsField(field, QVariant.String))
             else:
                 fields.append(QgsField(field, QVariant.Double))
 
@@ -345,10 +345,11 @@ class SZ_utils():
 
         if writer.hasError() != QgsVectorFileWriter.NoError:
             print("Error when creating shapefile: ",  writer.errorMessage())
+        cols=[c for c in df.columns if c!='geom']
         for i, row in df.iterrows():
             fet = QgsFeature()
             fet.setGeometry(QgsGeometry.fromWkt(row['geom']))
-            fet.setAttributes(list(map(float,list(df.loc[ i, df.columns != 'geom']))))
+            fet.setAttributes([row[c] if isinstance(row[c],str) else float(row[c]) for c in cols])
             writer.addFeature(fet)
 
         del writer

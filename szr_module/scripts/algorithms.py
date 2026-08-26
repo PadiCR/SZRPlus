@@ -17,149 +17,118 @@ import csv
 import matplotlib.pyplot as plt
 import json
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Frequentist methods (WoE, FR) need CLASSIFIED covariates
+# ─────────────────────────────────────────────────────────────────────────────
+# They weight discrete classes from the counts of landslide / non-landslide
+# units inside each one. Fed a continuous field, every value becomes its own
+# class holding a single unit: Npx1 or Npx3 is then always 0, every weight
+# collapses to ~0, and nothing transfers to values not seen in training. The
+# run "succeeds" but the result is meaningless, so refuse it up front.
+
+CLASS_COUNT_MAX = 30            # a class field rarely has more classes than this
+CLASS_COUNT_FRACTION = 0.10     # ...nor more than this share of the units
+
+
+def looks_continuous(n_distinct, n_rows):
+    """True when a covariate has too many distinct values to be a class field."""
+    return (n_distinct > CLASS_COUNT_MAX and
+            n_distinct > CLASS_COUNT_FRACTION * n_rows)
+
+
+def continuous_covariate_message(offenders, n_rows):
+    """(short, detail) naming the covariates that are not classified.
+
+    `offenders` is a list of (covariate_name, distinct_value_count).
+    """
+    names = ', '.join(name for name, _ in offenders)
+    counts = ', '.join(f'{name}: {d} distinct values' for name, d in offenders)
+    short = ('Weight of Evidence and Frequency Ratio need classified '
+             f'(categorical) covariates. These look continuous: {names}.')
+    detail = (
+        f'{short}\n\n'
+        f'Over {n_rows} units, each of these fields holds almost one distinct '
+        'value per unit, so every class would contain a single unit and every '
+        f'weight would collapse to about zero ({counts}).\n\n'
+        'Classify them first - Data Preparation > "Classify Field in Quantiles" '
+        '(deciles are the usual choice) or "Classify Field by .txt File" for '
+        'your own breaks - and run the method on the resulting class fields.\n\n'
+        'Alternatively use LR, RF, SVM or DT, which take continuous covariates '
+        'directly.')
+    return short, detail
+
 
 class Algorithms():
 
+    def _sklearn_simple(parameters,classifier):
+        """Fit `classifier` on the train split and score train, test and - when
+        parameters['alldata'] is supplied - the whole dataset.
+
+        The scaler and the model are always fitted on the train split alone;
+        the extra frame is only ever scored, so its SI stays an out-of-sample
+        prediction for every row that was not used for fitting. `alldata` gains
+        an SI column in place.
+        """
+        sc = StandardScaler()
+        nomi=parameters['nomi']
+        train=parameters['train']
+        test=parameters['testy']
+        X_train = sc.fit_transform(train[nomi])
+        classifier.fit(X_train,train['y'])
+        train['SI']=classifier.predict_proba(X_train)[::,1]
+        if parameters['testN']>0:
+            X_test = sc.transform(test[nomi])
+            test['SI']=classifier.predict_proba(X_test)[::,1]
+        alldata=parameters.get('alldata')
+        if alldata is not None:
+            alldata['SI']=classifier.predict_proba(sc.transform(alldata[nomi]))[::,1]
+        return(train,test)
+
     def LR_simple(parameters):
-        sc = StandardScaler()
-        nomi=parameters['nomi']
-        train=parameters['train']
-        test=parameters['testy']
-        X_train = sc.fit_transform(train[nomi])
-        logistic_regression = LogisticRegression()
-        logistic_regression.fit(X_train,train['y'])
-        prob_fit=logistic_regression.predict_proba(X_train)[::,1]
-        if parameters['testN']>0:
-            X_test = sc.transform(test[nomi])
-            predictions = logistic_regression.predict(X_test)
-            #CI = logistic_regression.prediction_intervals(X_test, width=.95)
-            prob_predic=logistic_regression.predict_proba(X_test)[::,1]
-            test['SI']=prob_predic
-        train['SI']=prob_fit
-        return(train,test)
-        
+        return Algorithms._sklearn_simple(parameters,LogisticRegression())
+
     def DT_simple(parameters):
-        sc = StandardScaler()
-        nomi=parameters['nomi']
-        train=parameters['train']
-        test=parameters['testy']
-        X_train = sc.fit_transform(train[nomi])
-        classifier = DecisionTreeClassifier(criterion = 'entropy', random_state = 0)
-        classifier.fit(X_train,train['y'])
-        prob_fit=classifier.predict_proba(X_train)[::,1]
-        if parameters['testN']>0:
-            X_test = sc.transform(test[nomi])
-            predictions = classifier.predict(X_test)
-            #CI = classifier.prediction_intervals(X_test, width=.95)
-            prob_predic=classifier.predict_proba(X_test)[::,1]
-            test['SI']=prob_predic
-        train['SI']=prob_fit
-        return(train,test)
-    
+        return Algorithms._sklearn_simple(parameters,DecisionTreeClassifier(criterion = 'entropy', random_state = 0))
+
     def RF_simple(parameters):
-        sc = StandardScaler()
-        nomi=parameters['nomi']
-        train=parameters['train']
-        test=parameters['testy']
-        X_train = sc.fit_transform(train[nomi])
-        classifier = RandomForestClassifier(n_estimators = 10, criterion = 'entropy', random_state = 0)
-        classifier.fit(X_train,train['y'])
-        prob_fit=classifier.predict_proba(X_train)[::,1]
-        if parameters['testN']>0:
-            X_test = sc.transform(test[nomi])
-            predictions = classifier.predict(X_test)
-            #CI = classifier.prediction_intervals(X_test, width=.95)
-            prob_predic=classifier.predict_proba(X_test)[::,1]
-            test['SI']=prob_predic
-        train['SI']=prob_fit
-        return(train,test)
-    
+        return Algorithms._sklearn_simple(parameters,RandomForestClassifier(n_estimators = 10, criterion = 'entropy', random_state = 0))
+
     def SVC_simple(parameters):
-        sc = StandardScaler()
-        nomi=parameters['nomi']
-        train=parameters['train']
-        test=parameters['testy']
-        X_train = sc.fit_transform(train[nomi])
-        classifier = SVC(kernel = 'linear', random_state = 0,probability=True)
-        classifier.fit(X_train,train['y'])
-        prob_fit=classifier.predict_proba(X_train)[::,1]
-        if parameters['testN']>0:
-            X_test = sc.transform(test[nomi])
-            predictions = classifier.predict(X_test)
-            #CI = classifier.prediction_intervals(X_test, width=.95)
-            prob_predic=classifier.predict_proba(X_test)[::,1]
-            test['SI']=prob_predic
-        train['SI']=prob_fit
-        return(train,test)
+        return Algorithms._sklearn_simple(parameters,SVC(kernel = 'linear', random_state = 0,probability=True))
     
-    def fr_simple(parameters):
-        df=parameters['train']
-        test=parameters['testy']
-        nomi=parameters['nomi']
-        Npx1=None
-        Npx2=None
-        Npx3=None
-        Npx4=None
-        file = open(parameters['fold']+'/r_coeffs.txt','w')#################save W+, W- and Wf
-        file.write('covariate,class,Npx1,Npx2,Npx3,Npx4,Wf\n')
-        #print('covariates:',nomi)
+    def _require_classified(train,nomi):
+        """Refuse to build weights from covariates that are not classified."""
+        n_rows=len(train)
+        offenders=[]
         for ii in nomi:
-            classi=df[ii].unique()
-            for i in classi:
-                dd=pd.DataFrame()
-                dd = df.apply(lambda x : True if x['y'] == 1 and x[ii] == i else False, axis = 1)
-                Npx1 = len(dd[dd == True].index)
-                dd=pd.DataFrame()
-                dd = df.apply(lambda x : True if x[ii] == i else False, axis = 1)
-                Npx2 = len(dd[dd == True].index)
-                dd=pd.DataFrame()
-                dd = df.apply(lambda x : True if x['y'] == 1 else False, axis = 1)
-                Npx3 = len(dd[dd == True].index)
-                dd=pd.DataFrame()
-                #dd = df.apply(lambda x : True if x['y'] == 0 and x['y'] == 1 else False, axis = 1)
-                Npx4 = df.shape[0]#len(dd[dd == True].index)
-                #print(Npx1,Npx2,Npx3,Npx4)
-                if Npx1==0 or Npx3==0:
-                    Wf=0.
-                    #print(ii,i)
-                else:
-                    Wf=(np.divide((np.divide(Npx1,Npx2)),(np.divide(Npx3,Npx4))))
-                #Wf=Wplus-Wminus
-                var=[ii,i,Npx1,Npx2,Npx3,Npx4,Wf]
-                file.write(','.join(str(e) for e in var)+'\n')#################save W+, W- and Wf
-                df[ii][df[ii]==i]=float(Wf)
-                test[ii][test[ii]==i]=float(Wf)
-            #df.to_csv(self.f+'/file'+ii+'.csv')
-        file.close()
-        df['SI']=df[nomi].sum(axis=1)
-        test['SI']=test[nomi].sum(axis=1)
-        return(df,test)
-    
-    def woe_simple(parameters):
-        df=parameters['train']
-        test=parameters['testy']
-        nomi=parameters['nomi']
-        Npx1=None
-        Npx2=None
-        Npx3=None
-        Npx4=None
-        file = open(parameters['fold']+'/r_coeffs.txt','w')#################save W+, W- and Wf
+            n_distinct=train[ii].nunique()
+            if looks_continuous(n_distinct,n_rows):
+                offenders.append((ii,n_distinct))
+        if offenders:
+            raise ValueError(continuous_covariate_message(offenders,n_rows)[1])
+
+    def _woe_weights(train,nomi,fold,filename):
+        """W+, W- and Wf per covariate class, computed on `train` only.
+
+        Returns {covariate: {class: Wf}} and writes the weight table. The
+        covariate columns of `train` are never modified, so the same table can
+        be applied to any other frame afterwards.
+        """
+        Algorithms._require_classified(train,nomi)
+        os.makedirs(fold,exist_ok=True)
+        weights={}
+        y=train['y']
+        file = open(os.path.join(fold,filename),'w')#################save W+, W- and Wf
         file.write('covariate,class,Npx1,Npx2,Npx3,Npx4,W+,W-,Wf\n')
         for ii in nomi:
-            classi=df[ii].unique()
-            for i in classi:
-                dd=pd.DataFrame()
-                dd = df.apply(lambda x : True if x['y'] == 1 and x[ii] == i else False, axis = 1)
-                Npx1 = len(dd[dd == True].index)
-                dd=pd.DataFrame()
-                dd = df.apply(lambda x : True if x['y'] == 1 and x[ii] != i else False, axis = 1)
-                Npx2 = len(dd[dd == True].index)
-                dd=pd.DataFrame()
-                dd = df.apply(lambda x : True if x['y'] == 0 and x[ii] == i else False, axis = 1)
-                Npx3 = len(dd[dd == True].index)
-                dd=pd.DataFrame()
-                dd = df.apply(lambda x : True if x['y'] == 0 and x[ii] != i else False, axis = 1)
-                Npx4 = len(dd[dd == True].index)
+            col=train[ii]
+            w={}
+            for i in col.unique():
+                same=(col==i)
+                Npx1=int(((y==1)&same).sum())
+                Npx2=int(((y==1)&(~same)).sum())
+                Npx3=int(((y==0)&same).sum())
+                Npx4=int(((y==0)&(~same)).sum())
                 if Npx1==0 or Npx3==0:
                     Wplus=0.
                 else:
@@ -169,14 +138,79 @@ class Algorithms():
                 else:
                     Wminus=math.log((Npx2/(Npx1+Npx2))/(Npx4/(Npx3+Npx4)))
                 Wf=Wplus-Wminus
+                w[i]=Wf
                 var=[ii,i,Npx1,Npx2,Npx3,Npx4,Wplus,Wminus,Wf]
                 file.write(','.join(str(e) for e in var)+'\n')#################save W+, W- and Wf
-                df[ii][df[ii]==i]=float(Wf)
-                test[ii][test[ii]==i]=float(Wf)
-            #df.to_csv(self.f+'/file'+ii+'.csv')
+            weights[ii]=w
         file.close()
-        df['SI']=df[nomi].sum(axis=1)
-        test['SI']=test[nomi].sum(axis=1)
+        return weights
+
+    def _fr_weights(train,nomi,fold,filename):
+        """Frequency Ratio Wf per covariate class, computed on `train` only.
+
+        Same contract as _woe_weights: nothing in `train` is modified.
+        """
+        Algorithms._require_classified(train,nomi)
+        os.makedirs(fold,exist_ok=True)
+        weights={}
+        y=train['y']
+        Npx3=int((y==1).sum())
+        Npx4=train.shape[0]
+        file = open(os.path.join(fold,filename),'w')#################save Wf
+        file.write('covariate,class,Npx1,Npx2,Npx3,Npx4,Wf\n')
+        for ii in nomi:
+            col=train[ii]
+            w={}
+            for i in col.unique():
+                same=(col==i)
+                Npx1=int(((y==1)&same).sum())
+                Npx2=int(same.sum())
+                if Npx1==0 or Npx3==0:
+                    Wf=0.
+                else:
+                    Wf=float(np.divide((np.divide(Npx1,Npx2)),(np.divide(Npx3,Npx4))))
+                w[i]=Wf
+                var=[ii,i,Npx1,Npx2,Npx3,Npx4,Wf]
+                file.write(','.join(str(e) for e in var)+'\n')#################save Wf
+            weights[ii]=w
+        file.close()
+        return weights
+
+    def _apply_weights(frame,nomi,weights):
+        """SI = sum of the per-class weights over the covariates of `frame`.
+
+        A class that never appeared in training is absent from the table and
+        contributes 0 - the neutral weight - rather than leaking its raw value
+        into the sum. `frame` is not modified, so this can be called repeatedly
+        with the same weight table (train, test, or the whole dataset).
+        """
+        si=pd.Series(0.,index=frame.index,dtype=float)
+        for ii in nomi:
+            si=si+frame[ii].map(weights[ii]).fillna(0.).astype(float)
+        return si
+
+    def fr_simple(parameters):
+        df=parameters['train']
+        test=parameters['testy']
+        nomi=parameters['nomi']
+        weights=Algorithms._fr_weights(df,nomi,parameters['fold'],'r_coeffs.txt')
+        df['SI']=Algorithms._apply_weights(df,nomi,weights)
+        test['SI']=Algorithms._apply_weights(test,nomi,weights)
+        alldata=parameters.get('alldata')
+        if alldata is not None:
+            alldata['SI']=Algorithms._apply_weights(alldata,nomi,weights)
+        return(df,test)
+    
+    def woe_simple(parameters):
+        df=parameters['train']
+        test=parameters['testy']
+        nomi=parameters['nomi']
+        weights=Algorithms._woe_weights(df,nomi,parameters['fold'],'r_coeffs.txt')
+        df['SI']=Algorithms._apply_weights(df,nomi,weights)
+        test['SI']=Algorithms._apply_weights(test,nomi,weights)
+        alldata=parameters.get('alldata')
+        if alldata is not None:
+            alldata['SI']=Algorithms._apply_weights(alldata,nomi,weights)
         return(df,test)
     
     # def GAM(parameters):
@@ -294,81 +328,14 @@ class Algorithms():
     def fr_cv(classifier,X,y,train,test,fold=None,df=None,nomi=None):
         dff=df.loc[train,:]
         test=df.loc[test,:]
-        Npx1=None
-        Npx2=None
-        Npx3=None
-        Npx4=None
-        file = open(fold+'/r_coeff.txt','w')#################save W+, W- and Wf
-        file.write('covariate,class,Npx1,Npx2,Npx3,Npx4,Wf\n')
-        for ii in nomi:
-            classi=dff[ii].unique()
-            for i in classi:
-                dd=pd.DataFrame()
-                dd = dff.apply(lambda x : True if x['y'] == 1 and x[ii] == i else False, axis = 1)
-                Npx1 = len(dd[dd == True].index)
-                dd=pd.DataFrame()
-                dd = dff.apply(lambda x : True if x[ii] == i else False, axis = 1)
-                Npx2 = len(dd[dd == True].index)
-                dd=pd.DataFrame()
-                dd = dff.apply(lambda x : True if x['y'] == 1 else False, axis = 1)
-                Npx3 = len(dd[dd == True].index)
-                dd=pd.DataFrame()
-                Npx4 = dff.shape[0]#len(dd[dd == True].index)
-                if Npx1==0 or Npx3==0:
-                    Wf=0.
-                else:
-                    Wf=(np.divide((np.divide(Npx1,Npx2)),(np.divide(Npx3,Npx4))))
-                var=[ii,i,Npx1,Npx2,Npx3,Npx4,Wf]
-                file.write(','.join(str(e) for e in var)+'\n')#################save W+, W- and Wf
-                dff[ii][dff[ii]==i]=float(Wf)
-                test[ii][test[ii]==i]=float(Wf)
-        file.close()
-        dff['SI']=dff[nomi].sum(axis=1)
-        test['SI']=test[nomi].sum(axis=1)
-        return(test['SI'],None)
+        weights=Algorithms._fr_weights(dff,nomi,fold,'r_coeff.txt')
+        return(Algorithms._apply_weights(test,nomi,weights),None)
     
     def woe_cv(classifier,X,y,train,test,fold=None,df=None,nomi=None):
         dff=df.loc[train,:]
         test=df.loc[test,:]
-        Npx1=None
-        Npx2=None
-        Npx3=None
-        Npx4=None
-        file = open(fold+'/r_coeff.txt','w')#################save W+, W- and Wf
-        file.write('covariate,class,Npx1,Npx2,Npx3,Npx4,W+,W-,Wf\n')
-        for ii in nomi:
-            classi=dff[ii].unique()
-            for i in classi:
-                dd=pd.DataFrame()
-                dd = dff.apply(lambda x : True if x['y'] == 1 and x[ii] == i else False, axis = 1)
-                Npx1 = len(dd[dd == True].index)
-                dd=pd.DataFrame()
-                dd = dff.apply(lambda x : True if x['y'] == 1 and x[ii] != i else False, axis = 1)
-                Npx2 = len(dd[dd == True].index)
-                dd=pd.DataFrame()
-                dd = dff.apply(lambda x : True if x['y'] == 0 and x[ii] == i else False, axis = 1)
-                Npx3 = len(dd[dd == True].index)
-                dd=pd.DataFrame()
-                dd = dff.apply(lambda x : True if x['y'] == 0 and x[ii] != i else False, axis = 1)
-                Npx4 = len(dd[dd == True].index)
-                if Npx1==0 or Npx3==0:
-                    Wplus=0.
-                else:
-                    Wplus=math.log((Npx1/(Npx1+Npx2))/(Npx3/(Npx3+Npx4)))
-                if Npx2==0 or Npx4==0:
-                    Wminus=0.
-                else:
-                    Wminus=math.log((Npx2/(Npx1+Npx2))/(Npx4/(Npx3+Npx4)))
-                Wf=Wplus-Wminus
-                var=[ii,i,Npx1,Npx2,Npx3,Npx4,Wplus,Wminus,Wf]
-                file.write(','.join(str(e) for e in var)+'\n')#################save W+, W- and Wf
-                dff[ii][dff[ii]==i]=float(Wf)
-                test[ii][test[ii]==i]=float(Wf)
-            #df.to_csv(self.f+'/file'+ii+'.csv')
-        file.close()
-        dff['SI']=dff[nomi].sum(axis=1)
-        test['SI']=test[nomi].sum(axis=1)
-        return(test['SI'],None)
+        weights=Algorithms._woe_weights(dff,nomi,fold,'r_coeff.txt')
+        return(Algorithms._apply_weights(test,nomi,weights),None)
     
     def GAM_cv(classifier,X,y,train,test,splines=None,dtypes=None,nomi=None,df=None,fold=None,filename=None,scaler=None):
         lams = np.empty(len(nomi))
@@ -674,11 +641,23 @@ class Raster_Algorithms():
             idx_te = idx
         return idx_tr, idx_te
 
+    def _require_classified_r(X_train, cov_names):
+        """Raster counterpart of Algorithms._require_classified."""
+        offenders = []
+        for i in range(X_train.shape[1]):
+            n_distinct = len(np.unique(X_train[:, i]))
+            if looks_continuous(n_distinct, len(X_train)):
+                name = cov_names[i] if i < len(cov_names) else f'covariate {i}'
+                offenders.append((name, n_distinct))
+        if offenders:
+            raise ValueError(continuous_covariate_message(offenders, len(X_train))[1])
+
     def _woe_predict(X_train, y_train, X_target, cov_names, folder,
                      save_weights=True):
         """WoE weights computed on train, applied to target. Returns si array."""
         si_target = np.zeros(len(X_target), dtype=np.float64)
         if save_weights:
+            Raster_Algorithms._require_classified_r(X_train, cov_names)
             os.makedirs(folder, exist_ok=True)
             wfile = open(os.path.join(folder, 'woe_weights.csv'), 'w')
             wfile.write('covariate,class,Npx1,Npx2,Npx3,Npx4,W+,W-,Wf\n')
@@ -711,6 +690,7 @@ class Raster_Algorithms():
         """FR weights computed on train, applied to target. Returns si array."""
         si_target = np.zeros(len(X_target), dtype=np.float64)
         if save_weights:
+            Raster_Algorithms._require_classified_r(X_train, cov_names)
             os.makedirs(folder, exist_ok=True)
             wfile = open(os.path.join(folder, 'fr_weights.csv'), 'w')
             wfile.write('covariate,class,Npx1,Npx2,Npx3,Npx4,Wf\n')

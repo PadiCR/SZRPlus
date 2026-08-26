@@ -6,7 +6,7 @@
 name=SZR+
 qgisMinimumVersion=3.28
 description=SZR+ (Susceptibility Zoning + Raster capabilities)
-version=1.10
+version=1.10.1
 author=Cristobal Padilla
 email=cristobalpadilla@gmail.com
 
@@ -19,7 +19,8 @@ repository=https://github.com/PadiCR/SZRPlus
 # Recommended items:
 
 hasProcessingProvider=yes
-changelog=1.10 - Redesigned GUI in a resizable window with the QGIS icon in its title bar, an in-panel message bar and theme-aware styling (light/dark); native extent and multi-field selectors; runs execute on the QGIS task manager and are cancellable; much faster start-up (dependencies are no longer re-checked via pip on every launch); pages are built on demand; result raster styles are stored as .qml sidecars so they survive reloading. Fixes: Vector Base runs failing with an undefined variable, Classify Vector by ROC/Weighted ROC failing on a bad parameter key, and Data Preparation failing when a non-temporary output file was chosen.
+changelog=1.10.1 - Vector Base fixes and Classify SI parity with the raster mode. Fixes: Weight of Evidence and Frequency Ratio no longer leak raw covariate values into the test Susceptibility Index (unseen classes now contribute a neutral 0), which previously inflated or corrupted every test score; the Vector Base backend no longer fails on a missing module or a wrong parameter key; and a stray local import that broke the Classify SI tools was removed. New: WoE and FR refuse to run on continuous covariates and explain how to classify them; Binomial vector mode writes a single Susceptibility Index GeoPackage covering every slope unit, with a split field marking Train/Test; Classify SI (vector) gains Closest Point (0,1), F1-Score, Threat Score (CSI) and Youden's J, and now produces a classified layer with named classes and the RdYlGn colour ramp, matching the raster tools; Youden's J added to the raster mode too; every threshold method gains a Class Break Method (equal interval or quantile) and writes a confusion-matrix and metrics CSV; new-field names are validated against the shapefile 10-character limit.
+    1.10 - Redesigned GUI in a resizable window with the QGIS icon in its title bar, an in-panel message bar and theme-aware styling (light/dark); native extent and multi-field selectors; runs execute on the QGIS task manager and are cancellable; much faster start-up (dependencies are no longer re-checked via pip on every launch); pages are built on demand; result raster styles are stored as .qml sidecars so they survive reloading. Fixes: Vector Base runs failing with an undefined variable, Classify Vector by ROC/Weighted ROC failing on a bad parameter key, and Data Preparation failing when a non-temporary output file was chosen.
     1.9 - Minor information panel text edits and clarifications.
 
 # Tags are comma separated with spaces allowed
