@@ -1,0 +1,28 @@
+# Shell scripts must stay LF. A CRLF shebang becomes "#!/bin/bash\r", which
+# Linux reports as "bad interpreter: /bin/bash^M".
+*.sh text eol=lf
+
+# Geodata, QGIS projects and the packaged plugin are binary. Declaring them
+# stops git from ever applying newline conversion to them, which would corrupt
+# a shapefile or a GeoTIFF, and keeps them out of textual diffs.
+*.tif binary
+*.tiff binary
+*.gpkg binary
+*.shp binary
+*.shx binary
+*.dbf binary
+*.sbn binary
+*.sbx binary
+*.qix binary
+*.qgz binary
+*.zip binary
+*.rar binary
+*.pdf binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.svg text
+
+# Note: Python and other text files are deliberately left to git's existing
+# behaviour. Adding "* text=auto" would renormalise every tracked file at once
+# and produce a repository-wide diff.
