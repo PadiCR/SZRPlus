@@ -103,9 +103,16 @@ class classePlugin(object):
                 and self.installer.activate_env()):
             return True
 
-        if self.installer.preliminay_req() is False:
+        if self.installer.preliminay_req() is not True:
             return False
-        if self.installer.requirements() is False:
+        if self.installer.requirements() is not True:
+            return False
+        # The "installed" flag is what lets later start-ups take the fast path,
+        # so it must only be set once every requirement really imports.
+        missing = self.installer.missing_modules()
+        if missing:
+            warn("SZR+ dependencies still missing after installation: "
+                 + ", ".join(sorted(missing)))
             return False
         return True
 
